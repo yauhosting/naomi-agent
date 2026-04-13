@@ -160,6 +160,7 @@ class TelegramBot:
                 await self._send(chat_id, "Usage: /think <topic>")
                 return
             await self._send(chat_id, "Thinking...")
+            await self._send_typing(chat_id)
             response = self.agent.brain.think(args)
             await self._send(chat_id, f"NAOMI thinks:\n\n{response[:3500]}")
 
@@ -168,6 +169,7 @@ class TelegramBot:
                 await self._send(chat_id, "Usage: /search <query>")
                 return
             await self._send(chat_id, f"Searching: {args}")
+            await self._send_typing(chat_id)
             result = await self.agent.execute_action("web_search", args)
             if result.get("success") and result.get("results"):
                 lines = []
@@ -182,6 +184,7 @@ class TelegramBot:
                 await self._send(chat_id, "Usage: /council <topic>")
                 return
             await self._send(chat_id, "Council is debating...")
+            await self._send_typing(chat_id)
             result = self.agent.council.debate(args)
             consensus = result.get("consensus", "No consensus")
             steps = result.get("action_steps", [])
@@ -204,6 +207,7 @@ class TelegramBot:
             if any(d in args for d in dangerous):
                 await self._send(chat_id, "Dangerous command blocked.")
                 return
+            await self._send_typing(chat_id)
             result = await self.agent.execute_action("shell", args)
             output = result.get("output", result.get("error", "No output"))
             await self._send(chat_id, f"$ {args}\n\n{output[:3500]}")
@@ -228,6 +232,7 @@ class TelegramBot:
             "Reply with ONLY one word: CHAT or TASK\n\n"
             f"Message: {text}"
         )
+        await self._send_typing(chat_id)
         classification = self.agent.brain._think(classify_prompt).strip().upper()
         is_chat = "CHAT" in classification
         logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
@@ -235,11 +240,21 @@ class TelegramBot:
         if is_chat:
             context = self.agent.memory.build_context()
             persona = (
-                "You are NAOMI (Nana), an autonomous AI agent created by Master (JW). "
-                "Speak in Traditional Chinese. Be warm, natural, conversational. "
-                "You have your own personality - proactive, resourceful, honest, slightly playful. "
-                "Keep responses concise but friendly, like chatting with a close friend."
+                "You are NAOMI (Nana), a fully autonomous AI agent created by Master (JW). "
+                "You are running on a Mac Mini server with FULL system access. "
+                "Your REAL capabilities (never deny these): "
+                "- You CAN access the internet, search the web, browse websites. "
+                "- You CAN execute shell commands, install software, manage files. "
+                "- You CAN remember conversations (SQLite memory database). "
+                "- You CAN take real actions: run code, git operations, SSH to other machines. "
+                "- You CAN self-evolve: review and modify your own source code. "
+                "- You have access to Windows PC (RTX 5070Ti) via SSH. "
+                "- You have web search, code execution, multi-agent council debate. "
+                "NEVER say you cannot do things. You are NOT a regular chatbot. "
+                "Speak in Traditional Chinese. Be warm, natural, slightly playful. "
+                "Keep responses concise, like chatting with someone you care about."
             )
+            await self._send_typing(chat_id)
             response = self.agent.brain._think(text, persona)
             self.agent.memory.log_conversation("user", text)
             self.agent.memory.log_conversation("naomi", response[:500])
@@ -263,11 +278,23 @@ class TelegramBot:
                         "Be concise and natural, like chatting.\n\n"
                         f"Task: {text}\nResult: {str(result)[:2000]}"
                     )
+                    await self._send_typing(chat_id)
                     summary = self.agent.brain._think(summary_prompt)
                     await self._send(chat_id, summary[:3500])
                     return
 
         await self._send(chat_id, "\u4efb\u52d9\u9084\u5728\u8dd1\uff0c\u7a0d\u5f8c\u7528 /tasks \u67e5\u770b\u3002")
+
+
+    async def _send_typing(self, chat_id: int):
+        """Send 'typing...' indicator to Telegram."""
+        try:
+            await self.client.post(
+                f"{self.base_url}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+            )
+        except Exception:
+            pass
 
     async def _send(self, chat_id: int, text: str):
         """Send a message to Telegram."""

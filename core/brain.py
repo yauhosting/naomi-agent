@@ -196,6 +196,31 @@ NAOMI_TOOLS = [
         }
     },
     {
+        "name": "generate_image",
+        "description": "Generate an image using AI (ComfyUI). Returns file path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Image generation prompt"},
+                "output_path": {"type": "string", "description": "Where to save (optional)"}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "deploy_web",
+        "description": "Deploy a web project. Methods: vercel, netlify, gh-pages, local.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_dir": {"type": "string", "description": "Project directory path"},
+                "method": {"type": "string", "enum": ["vercel", "netlify", "gh-pages", "local"],
+                           "description": "Deployment method"}
+            },
+            "required": ["project_dir"]
+        }
+    },
+    {
         "name": "task_complete",
         "description": "Report that the task is complete. Call this when you have finished all actions.",
         "input_schema": {
@@ -628,6 +653,15 @@ class Brain:
                 direction = tool_input.get("direction", "down")
                 amount = tool_input.get("amount", 3)
                 return await executor.execute("scroll", f"{direction} {amount}")
+            elif tool_name == "generate_image":
+                prompt = tool_input["prompt"]
+                out = tool_input.get("output_path", "")
+                params = f"{prompt}|||{out}" if out else prompt
+                return await executor.execute("generate_image", params)
+            elif tool_name == "deploy_web":
+                d = tool_input.get("project_dir", "")
+                m = tool_input.get("method", "local")
+                return await executor.execute("deploy_web", f"{d}|||{m}")
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:

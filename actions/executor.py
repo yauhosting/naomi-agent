@@ -37,6 +37,8 @@ class ActionExecutor:
             "look_and_act": self._do_look_and_act,
             "web_fetch": self.web_fetch,
             "scroll": self._do_scroll,
+            "generate_image": self.generate_image,
+            "deploy_web": self.deploy_web,
         }
         self._brain = brain
 
@@ -249,6 +251,96 @@ class ActionExecutor:
         direction = parts[0] if parts else "down"
         amount = int(parts[1]) if len(parts) > 1 else 3
         return self._get_computer().scroll(direction, amount)
+
+    def generate_image(self, params: str) -> Dict[str, Any]:
+        """Generate an image using ComfyUI on Windows PC or local tools.
+        Format: prompt|||output_path  or just prompt (saves to /tmp/)
+        """
+        parts = params.split("|||", 1)
+        prompt = parts[0].strip()
+        output_path = parts[1].strip() if len(parts) > 1 else f"/tmp/naomi_gen_{int(time.time())}.png"
+
+        logger.info(f"Generating image: {prompt[:80]}")
+
+        # Try ComfyUI via OpenClaw API (Windows PC with GPU)
+        try:
+            import httpx
+            resp = httpx.post(
+                "http://127.0.0.1:18801/api/generate",
+                json={"prompt": prompt, "width": 1024, "height": 1024},
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("image_url"):
+                    # Download the image
+                    img_resp = httpx.get(data["image_url"], timeout=30)
+                    if img_resp.status_code == 200:
+                        with open(output_path, "wb") as f:
+                            f.write(img_resp.content)
+                        return {"success": True, "path": output_path,
+                                "method": "comfyui", "prompt": prompt}
+        except Exception as e:
+            logger.debug(f"ComfyUI generate failed: {e}")
+
+        # Fallback: use Python Pillow to create placeholder
+        try:
+            code = f"""
+from PIL import Image, ImageDraw, ImageFont
+img = Image.new('RGB', (1024, 1024), '#1a1a2e')
+draw = ImageDraw.Draw(img)
+draw.text((50, 480), '''{prompt[:60]}''', fill='#00d4aa')
+draw.text((50, 520), '[Placeholder — connect ComfyUI for real AI art]', fill='#888')
+img.save('{output_path}')
+print('saved')
+"""
+            result = self.execute_python(code)
+            if result.get("success"):
+                return {"success": True, "path": output_path,
+                        "method": "placeholder", "prompt": prompt}
+        except Exception:
+            pass
+
+        return {"success": False, "error": "No image generation backend available"}
+
+    def deploy_web(self, params: str) -> Dict[str, Any]:
+        """Deploy a web project. Format: project_dir|||method
+        Methods: vercel, netlify, gh-pages, local (python http.server)
+        """
+        parts = params.split("|||", 1)
+        project_dir = parts[0].strip()
+        method = parts[1].strip() if len(parts) > 1 else "local"
+
+        if not os.path.isdir(project_dir):
+            return {"success": False, "error": f"Directory not found: {project_dir}"}
+
+        logger.info(f"Deploying {project_dir} via {method}")
+
+        if method == "vercel":
+            result = self.execute_shell(f"cd '{project_dir}' && npx vercel --yes 2>&1")
+            return {**result, "method": "vercel"}
+
+        elif method == "netlify":
+            result = self.execute_shell(f"cd '{project_dir}' && npx netlify deploy --prod 2>&1")
+            return {**result, "method": "netlify"}
+
+        elif method == "gh-pages":
+            result = self.execute_shell(
+                f"cd '{project_dir}' && git init && git add -A && git commit -m 'deploy' && "
+                f"npx gh-pages -d . 2>&1"
+            )
+            return {**result, "method": "gh-pages"}
+
+        elif method == "local":
+            # Start a simple HTTP server in background
+            port = 18900
+            result = self.execute_shell(
+                f"cd '{project_dir}' && nohup python3 -m http.server {port} > /dev/null 2>&1 &"
+                f" && echo 'Server started on port {port}'"
+            )
+            return {**result, "method": "local", "url": f"http://localhost:{port}"}
+
+        return {"success": False, "error": f"Unknown deploy method: {method}"}
 
 
 class ToolManager:

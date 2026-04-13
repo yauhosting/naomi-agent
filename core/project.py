@@ -113,10 +113,20 @@ class ProjectPipeline:
                 "Include an installation phase if an engine is needed."
             )
 
+        # Web development context
+        web_hint = (
+            "\nWeb development tools available: "
+            "node/npm/npx (v22), python3 (3.14), git. "
+            "Frameworks: can install Next.js, React, Vue, Vite, Tailwind via npx. "
+            "Image generation: ComfyUI API at http://127.0.0.1:18801/api/generate (AI art on RTX 5070Ti GPU). "
+            "Deployment: vercel, netlify, gh-pages, or local http server. "
+            "For web projects, include: scaffold → code → assets → test → deploy phases."
+        )
+
         result = self.brain._call_claude_cli(
             f"Decompose this project into 5-8 phases. Each phase should be independently executable.\n\n"
             f"Project goal: {goal}\n"
-            f"{engine_hint}\n\n"
+            f"{engine_hint}\n{web_hint}\n\n"
             f"For each phase, define: tasks (concrete steps), deliverables (files/outputs), "
             f"and verification (how to check it's done). "
             f"Use real tools and frameworks. Be specific about file paths relative to the project root. "

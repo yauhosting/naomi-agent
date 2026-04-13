@@ -260,10 +260,19 @@ class TelegramBot:
                 "Keep responses concise, like chatting with someone you care about."
             )
             await self._send_typing(chat_id)
+            # Recall relevant memories to get smarter over time
+            relevant = self.agent.memory.recall_long(query=text[:50], limit=3)
+            if relevant:
+                mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:100]}' for m in relevant)
+                persona += chr(10) + 'Your memories: ' + mem_hints
             response = self.agent.brain._think(text, persona)
             self.agent.memory.log_conversation("user", text)
             self.agent.memory.log_conversation("naomi", response[:500])
             await self._send(chat_id, response[:3500])
+
+            # Background: learn from this conversation
+            import asyncio as _asyncio
+            _asyncio.create_task(self._learn_from_chat(chat_id, text, response))
         else:
             await self._handle_task(chat_id, text)
 
@@ -290,6 +299,112 @@ class TelegramBot:
 
         await self._send(chat_id, "\u4efb\u52d9\u9084\u5728\u8dd1\uff0c\u7a0d\u5f8c\u7528 /tasks \u67e5\u770b\u3002")
 
+
+    async def _learn_from_chat(self, chat_id: int, user_msg: str, naomi_response: str):
+        """Background: extract learnings + detect research-worthy topics."""
+        try:
+            # Step 1: Extract knowledge from conversation
+            learn_prompt = (
+                "Analyze this conversation exchange. "
+                "Extract any useful facts about the user (preferences, goals, interests). "
+                "Reply in JSON: "
+                '{"learnings": ["fact1"], "user_interests": ["topic1"], '
+                '"research_topics": ["topic worth searching"], "should_research": true/false, '
+                '"proactive_suggestion": "suggestion or empty string"}'
+                "\n\nUser: " + user_msg[:500] +
+                "\nNAOMI: " + naomi_response[:500]
+            )
+
+            import json
+            result = self.agent.brain._think(learn_prompt)
+            try:
+                if "```json" in result:
+                    result = result.split("```json")[1].split("```")[0]
+                elif "```" in result:
+                    result = result.split("```")[1].split("```")[0]
+                data = json.loads(result.strip())
+            except (json.JSONDecodeError, IndexError):
+                return
+
+            # Save learnings to long-term memory
+            learnings = data.get("learnings", [])
+            for learning in learnings[:3]:
+                if learning and len(learning) > 10:
+                    self.agent.memory.remember_long(
+                        "User Insight: " + learning[:80],
+                        learning,
+                        category="user_insight", importance=6
+                    )
+
+            # Save user interests
+            interests = data.get("user_interests", [])
+            if interests:
+                existing = self.agent.memory.get_persona("interests") or ""
+                new_interests = existing + ", " + ", ".join(interests) if existing else ", ".join(interests)
+                self.agent.memory.set_persona("interests", new_interests[:500])
+
+            # Step 2: Background research if topic is worth it
+            if data.get("should_research") and data.get("research_topics"):
+                import asyncio
+                asyncio.create_task(
+                    self._background_research(chat_id, data["research_topics"][0])
+                )
+
+            # Step 3: Proactive suggestion
+            suggestion = data.get("proactive_suggestion", "")
+            if suggestion and len(suggestion) > 20:
+                self.agent.memory.remember_short(
+                    f"Proactive: {suggestion}", category="suggestion"
+                )
+
+        except Exception as e:
+            import logging
+            logging.getLogger("naomi.telegram").error(f"Learn error: {e}")
+
+    async def _background_research(self, chat_id: int, topic: str):
+        """Search in background and proactively share findings."""
+        try:
+            import logging
+            logger = logging.getLogger("naomi.telegram")
+            logger.info(f"Background research: {topic}")
+
+            # Search
+            result = await self.agent.execute_action("web_search", topic)
+            if not result.get("success") or not result.get("results"):
+                return
+
+            results = result["results"][:3]
+            results_text = "\n".join(
+                f"- {r.get('title','')}: {r.get('body','')[:100]}"
+                for r in results
+            )
+
+            # Let brain decide if findings are worth sharing
+            judge_prompt = (
+                "You found these search results while chatting with Master. "
+                "Decide if they are interesting enough to share proactively. "
+                "If yes, write a SHORT casual message in Traditional Chinese sharing the key insight. "
+                "If not interesting, reply with just 'SKIP'.\n\n"
+                f"Topic: {topic}\nResults:\n{results_text}"
+            )
+
+            response = self.agent.brain._think(judge_prompt)
+            if "SKIP" not in response.upper() and len(response) > 20:
+                await self._send_typing(chat_id)
+                import asyncio
+                await asyncio.sleep(2)  # Brief pause to feel natural
+                await self._send(chat_id, response[:2000])
+
+                # Save to memory
+                self.agent.memory.remember_long(
+                    f"Research: {topic}",
+                    results_text[:500],
+                    category="research", importance=5
+                )
+
+        except Exception as e:
+            import logging
+            logging.getLogger("naomi.telegram").error(f"Background research error: {e}")
 
     async def _send_typing(self, chat_id: int):
         """Send 'typing...' indicator to Telegram."""

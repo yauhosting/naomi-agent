@@ -995,9 +995,57 @@ class Brain:
 
         return "[Brain offline: No backend available]"
 
-    # === High-level methods (backward compat) ===
+    # === Smart Routing ===
+
+    def _classify_complexity(self, prompt: str) -> str:
+        """Classify task complexity: light → MiniMax/GLM, heavy → Claude CLI.
+        Light: greetings, simple Q&A, translation, short answers
+        Heavy: coding, debugging, analysis, multi-step reasoning, projects
+        """
+        prompt_lower = prompt.lower()
+        heavy_signals = [
+            "code", "debug", "fix", "error", "bug", "implement", "build",
+            "review", "analyze", "architecture", "design", "refactor",
+            "寫代碼", "程式", "修改", "修復", "分析", "設計", "架構", "重構",
+            "def ", "class ", "function", "import ", "```",
+            "explain this code", "what does this", "how to implement",
+        ]
+        if any(sig in prompt_lower for sig in heavy_signals):
+            return "heavy"
+        if len(prompt) > 500:  # Long prompts usually need more reasoning
+            return "heavy"
+        return "light"
+
+    def think_smart(self, prompt: str, context: str = "") -> str:
+        """Smart routing: light tasks → cheap model, heavy tasks → Claude CLI."""
+        complexity = self._classify_complexity(prompt)
+        full = prompt + (f"\n\nContext:\n{context}" if context else "")
+        system = ("You are NAOMI, an autonomous AI agent. "
+                  "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
+
+        if complexity == "light":
+            # Try cheap models first for simple tasks
+            if self._minimax_key and self._is_backend_available("minimax"):
+                result = self._call_minimax(full, system)
+                if result and not result.startswith("[Brain"):
+                    logger.debug(f"Smart route: light task → MiniMax")
+                    self._record_success("minimax")
+                    return result
+            if self._glm_key and self._is_backend_available("glm"):
+                result = self._call_glm(full, system)
+                if result:
+                    logger.debug(f"Smart route: light task → GLM")
+                    return result
+
+        # Heavy tasks or fallback → Claude CLI (strongest)
+        return self._think(full, system)
+
+    # === High-level methods ===
 
     def think(self, prompt: str, context: str = "") -> str:
+        """General thinking — uses smart routing in auto mode."""
+        if self._active_mode == "auto":
+            return self.think_smart(prompt, context)
         system = ("You are NAOMI, an autonomous AI agent. "
                   "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
         full = prompt + (f"\n\nContext:\n{context}" if context else "")

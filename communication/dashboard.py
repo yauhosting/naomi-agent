@@ -128,6 +128,14 @@ def create_dashboard(agent) -> FastAPI:
         result = agent.brain.set_model(model_name)
         return result
 
+    @app.get("/api/usage", dependencies=[Depends(verify_token)])
+    async def get_usage():
+        return {
+            "brain": agent.brain.get_usage(),
+            "scheduler": agent.scheduler.get_status() if hasattr(agent, 'scheduler') else {},
+            "skills": agent.skills.get_status() if hasattr(agent, 'skills') else {},
+        }
+
     @app.post("/api/council", dependencies=[Depends(verify_token)])
     async def council_debate(request: Request):
         data = await request.json()

@@ -105,7 +105,8 @@ class TelegramBot:
                 "/council <topic> - Multi-agent debate\n"
                 "/evolve - Trigger self-evolution\n"
                 "/shell <cmd> - Execute shell command\n"
-                "/schedule <min> <task> - Schedule task\n"
+                "/schedule - Manage scheduled tasks\n"
+                "/usage - Usage statistics\n"
                 "/screen - Take screenshot\n"
                 "/click x y - Click at coordinates\n"
                 "/type <text> - Type text\n"
@@ -329,6 +330,25 @@ class TelegramBot:
             output = result.get("output", result.get("error", "No output"))
             await self._send(chat_id, f"$ {args}\n\n{output[:3500]}")
 
+        elif cmd == "/usage":
+            usage = self.agent.brain.get_usage()
+            backend_lines = "\n".join(
+                f"  {k}: {v} calls" for k, v in usage["by_backend"].items()
+            ) if usage["by_backend"] else "  (no calls yet)"
+            health_lines = "\n".join(
+                f"  {k}: {'⚠️ backoff' if v['in_backoff'] else '✓ OK'} ({v['failures']} failures)"
+                for k, v in usage["backend_health"].items() if v["failures"] > 0
+            )
+            await self._send(chat_id,
+                f"Usage Stats\n"
+                f"Total calls: {usage['total_calls']}\n"
+                f"Errors: {usage['errors']} ({usage['error_rate']}%)\n"
+                f"Uptime: {usage['uptime_hours']}h\n"
+                f"Rate: {usage['calls_per_hour']} calls/hr\n\n"
+                f"By backend:\n{backend_lines}"
+                + (f"\n\nHealth:\n{health_lines}" if health_lines else "")
+            )
+
         elif cmd == "/log":
             entries = self.agent.memory.recall_short(limit=10)
             if not entries:
@@ -339,26 +359,76 @@ class TelegramBot:
 
         elif cmd == "/schedule":
             if not args:
-                await self._send(chat_id, "Usage: /schedule <minutes> <task>\nExample: /schedule 30 check disk usage")
+                # List scheduled jobs
+                if hasattr(self.agent, 'scheduler'):
+                    jobs = self.agent.scheduler.list_jobs()
+                    if not jobs:
+                        await self._send(chat_id, "沒有排程任務\n\nUsage:\n/schedule <min> <task> — 一次性\n/schedule every <min> <task> — 重複\n/schedule list — 查看\n/schedule rm <id> — 刪除")
+                    else:
+                        lines = [f"[{j['status']}] {j['id']}: {j['command']} (next: {j['next_run']}, {j['interval']})" for j in jobs]
+                        await self._send(chat_id, "排程任務:\n" + "\n".join(lines))
                 return
             parts = args.split(None, 1)
-            if len(parts) < 2:
-                await self._send(chat_id, "Usage: /schedule <minutes> <task>")
-                return
-            try:
-                minutes = int(parts[0])
-                task_text = parts[1]
-            except ValueError:
-                await self._send(chat_id, "First argument must be minutes (number)")
-                return
-            run_at = time.time() + minutes * 60
-            self.agent.memory.remember_short(
-                f"SCHEDULED|{run_at}|{task_text}",
-                category="scheduled",
-                ttl=minutes * 60 + 300,  # TTL slightly longer than schedule
-            )
-            run_time = time.strftime("%H:%M", time.localtime(run_at))
-            await self._send(chat_id, f"已排程: {minutes} 分鐘後 ({run_time}) 執行\n{task_text}")
+            sub = parts[0].lower()
+
+            if sub == "list":
+                jobs = self.agent.scheduler.list_jobs()
+                if not jobs:
+                    await self._send(chat_id, "沒有排程任務")
+                else:
+                    lines = [f"[{j['status']}] {j['id']}: {j['command']} ({j['interval']}, runs:{j['runs']})" for j in jobs]
+                    await self._send(chat_id, "排程:\n" + "\n".join(lines))
+
+            elif sub == "rm" and len(parts) > 1:
+                result = self.agent.scheduler.remove(parts[1])
+                await self._send(chat_id, f"{'已刪除' if result['success'] else result.get('error','?')}")
+
+            elif sub == "pause" and len(parts) > 1:
+                result = self.agent.scheduler.pause(parts[1])
+                await self._send(chat_id, f"{'已暫停' if result['success'] else result.get('error','?')}")
+
+            elif sub == "every":
+                # Recurring: /schedule every 60 check disk
+                rest = parts[1] if len(parts) > 1 else ""
+                rparts = rest.split(None, 1)
+                if len(rparts) < 2:
+                    await self._send(chat_id, "Usage: /schedule every <minutes> <task>")
+                    return
+                try:
+                    minutes = int(rparts[0])
+                    task_text = rparts[1]
+                except ValueError:
+                    await self._send(chat_id, "Usage: /schedule every <minutes> <task>")
+                    return
+                result = self.agent.scheduler.add(
+                    name=task_text[:40], command=task_text,
+                    interval_minutes=minutes, repeat=-1,
+                )
+                if result.get("success"):
+                    await self._send(chat_id, f"已排程: 每 {minutes} 分鐘執行\n{task_text}")
+                else:
+                    await self._send(chat_id, f"排程失敗: {result.get('error','?')}")
+
+            else:
+                # One-shot: /schedule 30 check disk
+                if len(parts) < 2:
+                    await self._send(chat_id, "Usage: /schedule <minutes> <task>")
+                    return
+                try:
+                    minutes = int(parts[0])
+                    task_text = parts[1]
+                except ValueError:
+                    await self._send(chat_id, "Usage: /schedule <minutes> <task>")
+                    return
+                run_at = time.time() + minutes * 60
+                result = self.agent.scheduler.add(
+                    name=task_text[:40], command=task_text, run_at=run_at,
+                )
+                if result.get("success"):
+                    run_time = time.strftime("%H:%M", time.localtime(run_at))
+                    await self._send(chat_id, f"已排程: {minutes} 分鐘後 ({run_time}) 執行\n{task_text}")
+                else:
+                    await self._send(chat_id, f"排程失敗: {result.get('error','?')}")
 
         elif cmd == "/screen":
             await self._send(chat_id, "Taking screenshot...")

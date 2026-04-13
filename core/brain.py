@@ -236,6 +236,15 @@ class Brain:
         self._active_mode = "auto"
         self._anthropic_client = None
 
+        # Error failover tracking
+        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0}
+        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0}
+        self._max_failures_before_backoff = 3
+        self._backoff_seconds = 60  # Skip a failed backend for 60s
+
+        # Usage tracking
+        self._usage = {"total_calls": 0, "by_backend": {}, "errors": 0, "start_time": time.time()}
+
         # Load .env
         load_dotenv()
         load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
@@ -816,6 +825,23 @@ Do NOT answer the question yourself. Do NOT describe actions. Just output the JS
         return {"name": self._active_mode, "backend": entry[0],
                 "model_id": entry[1] or "(CLI default)", "description": entry[2]}
 
+    def get_usage(self) -> Dict[str, Any]:
+        """Get usage statistics."""
+        uptime = time.time() - self._usage["start_time"]
+        hours = uptime / 3600
+        return {
+            "total_calls": self._usage["total_calls"],
+            "errors": self._usage["errors"],
+            "by_backend": self._usage["by_backend"],
+            "uptime_hours": round(hours, 1),
+            "calls_per_hour": round(self._usage["total_calls"] / max(hours, 0.01), 1),
+            "error_rate": round(self._usage["errors"] / max(self._usage["total_calls"], 1) * 100, 1),
+            "backend_health": {
+                k: {"failures": v, "in_backoff": time.time() < self._backoff_until.get(k, 0)}
+                for k, v in self._consecutive_failures.items()
+            },
+        }
+
     def list_models(self) -> List[Dict[str, str]]:
         models = []
         for name, (backend, model_id, desc) in self.MODEL_REGISTRY.items():
@@ -826,35 +852,68 @@ Do NOT answer the question yourself. Do NOT describe actions. Just output the JS
 
     # === _think: simple text-only response (backward compat) ===
 
+    def _is_backend_available(self, backend: str) -> bool:
+        """Check if a backend is available (not in backoff)."""
+        if self._consecutive_failures.get(backend, 0) >= self._max_failures_before_backoff:
+            if time.time() < self._backoff_until.get(backend, 0):
+                return False
+            # Backoff expired, reset and try again
+            self._consecutive_failures[backend] = 0
+        return True
+
+    def _record_success(self, backend: str):
+        """Record a successful call."""
+        self._consecutive_failures[backend] = 0
+        self._usage["total_calls"] += 1
+        self._usage["by_backend"][backend] = self._usage["by_backend"].get(backend, 0) + 1
+
+    def _record_failure(self, backend: str):
+        """Record a failed call with backoff."""
+        self._consecutive_failures[backend] = self._consecutive_failures.get(backend, 0) + 1
+        self._usage["errors"] += 1
+        if self._consecutive_failures[backend] >= self._max_failures_before_backoff:
+            self._backoff_until[backend] = time.time() + self._backoff_seconds
+            logger.warning(f"Backend {backend}: {self._consecutive_failures[backend]} consecutive failures, "
+                           f"backing off for {self._backoff_seconds}s")
+
     def _think(self, prompt: str, system_prompt: str = "") -> str:
-        """Simple text response — tries Anthropic API first, then fallbacks."""
-        # Try Anthropic API (no tools, just text)
-        if self._anthropic_key and self._active_mode in ("auto", "claude-sonnet", "claude-opus"):
+        """Text response with automatic failover and backoff."""
+        # Try Anthropic API
+        if (self._anthropic_key and self._active_mode in ("auto", "claude-sonnet", "claude-opus")
+                and self._is_backend_available("api")):
             response = self.call_anthropic(prompt, system_prompt)
             if response:
                 for block in response.content:
                     if block.type == "text":
+                        self._record_success("api")
                         return block.text
+            self._record_failure("api")
 
         # Fallback: Claude CLI
-        if self._active_mode in ("auto", "claude-cli"):
+        if self._active_mode in ("auto", "claude-cli") and self._is_backend_available("cli"):
             if self._check_claude_cli():
                 result = self._call_claude_cli(prompt, system_prompt)
                 if result and "Not logged in" not in result:
+                    self._record_success("cli")
                     return result
+                self._record_failure("cli")
 
         # Fallback: Claude proxy
-        if self._active_mode == "auto":
+        if self._active_mode == "auto" and self._is_backend_available("proxy"):
             result = self._call_claude_proxy(prompt, system_prompt)
             if result:
+                self._record_success("proxy")
                 return result
+            self._record_failure("proxy")
 
         # Fallback: MiniMax
-        if self._active_mode in ("auto", "minimax"):
+        if self._active_mode in ("auto", "minimax") and self._is_backend_available("minimax"):
             if self._minimax_key:
                 result = self._call_minimax(prompt, system_prompt)
                 if result and not result.startswith("[Brain"):
+                    self._record_success("minimax")
                     return result
+                self._record_failure("minimax")
 
         return "[Brain offline: No backend available]"
 

@@ -569,29 +569,18 @@ If multiple commands, separate with &&."""
             logger.debug(f"Memory consolidation: {e}")
 
     async def _check_scheduled_tasks(self):
-        """Check and execute scheduled tasks from memory."""
+        """Check and execute due scheduled tasks."""
+        if not hasattr(self.agent, 'scheduler'):
+            return
         try:
-            scheduled = self.agent.memory.recall_short(category="scheduled")
-            now = time.time()
-            for task in scheduled:
-                # Format: "SCHEDULED|<timestamp>|<command>"
-                content = task.get("content", "")
-                if not content.startswith("SCHEDULED|"):
-                    continue
-                parts = content.split("|", 2)
-                if len(parts) < 3:
-                    continue
-                run_at = float(parts[1])
-                command = parts[2]
-                if now >= run_at:
-                    logger.info(f"Executing scheduled task: {command[:80]}")
-                    # Remove from schedule
-                    self.agent.memory.conn.execute(
-                        "DELETE FROM short_term WHERE id=?", (task["id"],)
-                    )
-                    self.agent.memory.conn.commit()
-                    # Execute
-                    await self._execute_command(command)
+            due_jobs = self.agent.scheduler.get_due_jobs()
+            for job in due_jobs:
+                job_id = job["id"]
+                command = job["command"]
+                logger.info(f"Scheduled job due: [{job_id}] {command[:80]}")
+                await self._notify_master(f"⏰ 排程執行: {job['name']}\n{command[:100]}")
+                await self._execute_command(command)
+                self.agent.scheduler.mark_completed(job_id)
         except Exception as e:
             logger.debug(f"Scheduled tasks check: {e}")
 

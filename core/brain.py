@@ -248,8 +248,10 @@ class Brain:
         "claude-sonnet":  ("anthropic_api", "claude-sonnet-4-6-20250514", "Claude Sonnet 4.6 via API (tool_use + vision)"),
         "claude-opus":    ("anthropic_api", "claude-opus-4-6-20250514",   "Claude Opus 4.6 via API (strongest)"),
         "claude-cli":     ("claude_cli",    None,                         "Claude CLI direct (Max subscription)"),
-        "minimax":        ("minimax",       "MiniMax-M2.7",               "MiniMax M2.7 (free fallback)"),
-        "auto":           ("auto",          None,                         "Auto: API → CLI → MiniMax fallback"),
+        "glm":            ("glm",           "glm-5.1",                    "GLM 5.1 (Z.AI, OpenAI compatible)"),
+        "glm-turbo":      ("glm",           "glm-5-turbo",                "GLM 5 Turbo (Z.AI, fast)"),
+        "minimax":        ("minimax",       "MiniMax-M2.7",               "MiniMax M2.7 (fallback)"),
+        "auto":           ("auto",          None,                         "Auto: API → CLI → GLM → MiniMax fallback"),
     }
 
     def __init__(self, config: dict):
@@ -262,8 +264,8 @@ class Brain:
         self._anthropic_client = None
 
         # Error failover tracking
-        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0}
-        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0}
+        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0}
+        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0}
         self._max_failures_before_backoff = 3
         self._backoff_seconds = 60  # Skip a failed backend for 60s
 
@@ -277,11 +279,16 @@ class Brain:
         # Get API keys
         self._minimax_key = self.fallback.get("api_key") or os.environ.get("MINIMAX_API_KEY", "")
         self._anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        self._glm_key = os.environ.get("GLM_API_KEY", "")
+        self._glm_base_url = "https://api.z.ai/api/paas/v4"
 
         if self._anthropic_key:
             logger.info("Anthropic API key loaded — native tool_use enabled")
         else:
             logger.info("No ANTHROPIC_API_KEY — using Claude CLI (Max subscription)")
+
+        if self._glm_key:
+            logger.info("GLM API key loaded (Z.AI)")
 
         if self._minimax_key:
             logger.info("MiniMax API key loaded")
@@ -738,6 +745,46 @@ class Brain:
         except Exception as e:
             return f"[Brain error: {e}]"
 
+    def _call_glm(self, prompt: str, system_prompt: str = "",
+                   model: str = None) -> str:
+        """Call Z.AI GLM API (OpenAI-compatible format)."""
+        import httpx
+        if not self._glm_key:
+            return None
+
+        model = model or self.MODEL_REGISTRY.get(self._active_mode, ("", "glm-5.1", ""))[1]
+        if not model or not model.startswith("glm"):
+            model = "glm-5.1"
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            resp = httpx.post(
+                f"{self._glm_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._glm_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": model, "messages": messages, "max_tokens": 4096},
+                timeout=90,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                self._record_success("glm")
+                return content
+            else:
+                logger.warning(f"GLM API error {resp.status_code}: {resp.text[:200]}")
+                self._record_failure("glm")
+                return None
+        except Exception as e:
+            logger.error(f"GLM API failed: {e}")
+            self._record_failure("glm")
+            return None
+
     def _call_claude_proxy(self, prompt: str, system_prompt: str = "") -> str:
         import httpx
         proxy_url = self.primary.get("proxy_url", "http://127.0.0.1:18790/v1/chat/completions")
@@ -815,6 +862,8 @@ class Brain:
             "opus": "claude-opus", "claude opus": "claude-opus",
             "cli": "claude-cli", "claude": "claude-cli",
             "minimax2.7": "minimax", "minimax-m2.7": "minimax", "mm": "minimax",
+            "glm5": "glm", "glm-5": "glm", "glm5.1": "glm", "glm-5.1": "glm", "zhipu": "glm",
+            "glm-turbo": "glm-turbo", "glm5-turbo": "glm-turbo",
         }
         name = aliases.get(name, name)
 
@@ -828,6 +877,8 @@ class Brain:
             return {"success": False, "error": "No ANTHROPIC_API_KEY configured"}
         if backend == "claude_cli" and not self._check_claude_cli():
             return {"success": False, "error": "Claude CLI not found"}
+        if backend == "glm" and not self._glm_key:
+            return {"success": False, "error": "No GLM_API_KEY configured"}
         if backend == "minimax" and not self._minimax_key:
             return {"success": False, "error": "No MINIMAX_API_KEY configured"}
 
@@ -921,6 +972,13 @@ class Brain:
                 self._record_success("proxy")
                 return result
             self._record_failure("proxy")
+
+        # Fallback: GLM (Z.AI)
+        if self._active_mode in ("auto", "glm", "glm-turbo") and self._is_backend_available("glm"):
+            if self._glm_key:
+                result = self._call_glm(prompt, system_prompt)
+                if result:
+                    return result
 
         # Fallback: MiniMax
         if self._active_mode in ("auto", "minimax") and self._is_backend_available("minimax"):

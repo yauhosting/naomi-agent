@@ -1079,10 +1079,8 @@ class Brain:
     def _classify_complexity(self, prompt: str) -> str:
         """Classify: chat → MiniMax, code → CLI, private → local Ollama.
         Returns: 'chat', 'code', 'private'
+        In private mode: code still returns 'code' (→ CLI), rest returns 'private' (→ local)
         """
-        if self._private_mode:
-            return "private"
-
         prompt_lower = prompt.lower()
         code_signals = [
             "code", "debug", "fix", "error", "bug", "implement", "build",
@@ -1093,10 +1091,10 @@ class Brain:
             "script", "api", "server", "deploy", "database",
         ]
         if any(sig in prompt_lower for sig in code_signals):
-            return "code"
+            return "code"  # Always CLI, even in private mode
         if len(prompt) > 500:
             return "code"
-        return "chat"
+        return "private" if self._private_mode else "chat"
 
     def think_smart(self, prompt: str, context: str = "") -> str:
         """Multi-track routing:
@@ -1109,13 +1107,12 @@ class Brain:
         system = ("You are NAOMI, an autonomous AI agent. "
                   "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
 
-        # Private mode — local only, zero external calls
+        # Private mode — chat stays local, code still goes to CLI
         if complexity == "private":
             result = self._call_ollama(full, system, model=self._private_model)
             if result:
-                logger.debug(f"Smart route: private → Ollama {self._private_model}")
+                logger.debug(f"Smart route: private chat → Ollama {self._private_model}")
                 return result
-            # Private fallback: try any local model
             result = self._call_ollama(full, system)
             if result:
                 return result
@@ -1129,14 +1126,13 @@ class Brain:
                     logger.debug("Smart route: chat → MiniMax")
                     self._record_success("minimax")
                     return result
-            # Fallback: Ollama
             if self._is_backend_available("ollama"):
                 result = self._call_ollama(full, system)
                 if result:
                     logger.debug("Smart route: chat → Ollama (MiniMax failed)")
                     return result
 
-        # Code / heavy — Claude CLI (strongest)
+        # Code / heavy — Claude CLI (strongest, even in private mode)
         return self._think(full, system)
 
     # === High-level methods ===

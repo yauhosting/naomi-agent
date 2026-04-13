@@ -104,7 +104,7 @@ class Brain:
             # Anthropic format: content is array of blocks
             content = data.get("content", [])
             if content and isinstance(content, list):
-                return next((c.get("text", "") for c in content if c.get("type") == "text"), str(content))
+                return content[0].get("text", str(content))
             return str(data)
 
         except Exception as e:

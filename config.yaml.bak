@@ -14,8 +14,8 @@ brain:
   fallback:
     type: "minimax"
     api_key: ""  # Set via environment variable MINIMAX_API_KEY
-    model: "MiniMax-M2.7"
-    base_url: "https://api.minimax.io/anthropic/v1"
+    model: "MiniMax-Text-01"
+    base_url: "https://api.minimax.chat/v1"
 
 heartbeat:
   interval: 30          # seconds between heartbeats

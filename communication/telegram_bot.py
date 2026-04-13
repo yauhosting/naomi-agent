@@ -136,6 +136,7 @@ class TelegramBot:
                 "/type <text> - Type text\n"
                 "/key <key> - Press key (return, cmd+c...)\n"
                 "/app [name] - Open app / list windows\n"
+                "/private - Toggle privacy mode (local only)\n"
                 "/ollama - Manage local Ollama models\n"
                 "/security - Run security scan\n"
                 "/audit - View audit log\n"
@@ -472,6 +473,28 @@ class TelegramBot:
                 f"By backend:\n{backend_lines}"
                 + (f"\n\nHealth:\n{health_lines}" if health_lines else "")
             )
+
+        elif cmd == "/private":
+            if not args:
+                # Toggle
+                current = self.agent.brain._private_mode
+                result = self.agent.brain.set_private_mode(not current)
+                status = "🔒 ON" if result["private_mode"] else "🔓 OFF"
+                await self._send(chat_id,
+                    f"Private mode: {status}\n"
+                    f"Model: {result['model']}\n\n"
+                    f"{'所有對話都在本機處理，不會發送到任何外部 API' if result['private_mode'] else '恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）'}"
+                )
+            elif args.lower() in ("on", "開", "1"):
+                result = self.agent.brain.set_private_mode(True)
+                await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}\n所有對話都在本機處理")
+            elif args.lower() in ("off", "關", "0"):
+                result = self.agent.brain.set_private_mode(False)
+                await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由")
+            else:
+                # Set specific local model
+                result = self.agent.brain.set_private_mode(True, model=args.strip())
+                await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}")
 
         elif cmd == "/ollama":
             if not args:

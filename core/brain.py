@@ -1061,48 +1061,82 @@ class Brain:
 
     # === Smart Routing ===
 
+    # Privacy mode: when True, ALL messages go to local Ollama only (nothing leaves machine)
+    _private_mode = False
+    _private_model = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b"
+
+    def set_private_mode(self, enabled: bool, model: str = None) -> Dict[str, Any]:
+        """Toggle privacy mode — all traffic stays local when enabled."""
+        self._private_mode = enabled
+        if model:
+            self._private_model = model
+        logger.info(f"Private mode: {'ON → ' + self._private_model if enabled else 'OFF'}")
+        return {
+            "private_mode": enabled,
+            "model": self._private_model if enabled else "auto routing",
+        }
+
     def _classify_complexity(self, prompt: str) -> str:
-        """Classify task complexity: light → MiniMax/GLM, heavy → Claude CLI.
-        Light: greetings, simple Q&A, translation, short answers
-        Heavy: coding, debugging, analysis, multi-step reasoning, projects
+        """Classify: chat → MiniMax, code → CLI, private → local Ollama.
+        Returns: 'chat', 'code', 'private'
         """
+        if self._private_mode:
+            return "private"
+
         prompt_lower = prompt.lower()
-        heavy_signals = [
+        code_signals = [
             "code", "debug", "fix", "error", "bug", "implement", "build",
             "review", "analyze", "architecture", "design", "refactor",
-            "寫代碼", "程式", "修改", "修復", "分析", "設計", "架構", "重構",
+            "寫代碼", "寫程式", "程式碼", "修改代碼", "修復", "分析", "設計", "架構", "重構",
             "def ", "class ", "function", "import ", "```",
             "explain this code", "what does this", "how to implement",
+            "script", "api", "server", "deploy", "database",
         ]
-        if any(sig in prompt_lower for sig in heavy_signals):
-            return "heavy"
-        if len(prompt) > 500:  # Long prompts usually need more reasoning
-            return "heavy"
-        return "light"
+        if any(sig in prompt_lower for sig in code_signals):
+            return "code"
+        if len(prompt) > 500:
+            return "code"
+        return "chat"
 
     def think_smart(self, prompt: str, context: str = "") -> str:
-        """Smart routing: light tasks → local/cheap, heavy tasks → Claude CLI."""
+        """Multi-track routing:
+        - chat → MiniMax M2.7 (Master's preference)
+        - code → Claude CLI (strongest reasoning)
+        - private → local Gemma 4B (nothing leaves machine)
+        """
         complexity = self._classify_complexity(prompt)
         full = prompt + (f"\n\nContext:\n{context}" if context else "")
         system = ("You are NAOMI, an autonomous AI agent. "
                   "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
 
-        if complexity == "light":
-            # Try local Ollama first (free, no API cost)
-            if self._is_backend_available("ollama"):
-                result = self._call_ollama(full, system)
-                if result:
-                    logger.debug("Smart route: light task → Ollama (local)")
-                    return result
-            # Then MiniMax
+        # Private mode — local only, zero external calls
+        if complexity == "private":
+            result = self._call_ollama(full, system, model=self._private_model)
+            if result:
+                logger.debug(f"Smart route: private → Ollama {self._private_model}")
+                return result
+            # Private fallback: try any local model
+            result = self._call_ollama(full, system)
+            if result:
+                return result
+            return "[Private mode: Ollama not available. Use /private off to disable.]"
+
+        # Chat — MiniMax first (Master's preference), then Ollama, then CLI
+        if complexity == "chat":
             if self._minimax_key and self._is_backend_available("minimax"):
                 result = self._call_minimax(full, system)
                 if result and not result.startswith("[Brain"):
-                    logger.debug("Smart route: light task → MiniMax")
+                    logger.debug("Smart route: chat → MiniMax")
                     self._record_success("minimax")
                     return result
+            # Fallback: Ollama
+            if self._is_backend_available("ollama"):
+                result = self._call_ollama(full, system)
+                if result:
+                    logger.debug("Smart route: chat → Ollama (MiniMax failed)")
+                    return result
 
-        # Heavy tasks or fallback → Claude CLI (strongest)
+        # Code / heavy — Claude CLI (strongest)
         return self._think(full, system)
 
     # === High-level methods ===

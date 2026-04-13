@@ -82,8 +82,8 @@ class TelegramBot:
         if text.startswith("/"):
             await self._handle_command(chat_id, text)
         else:
-            # Treat as a task for NAOMI
-            await self._handle_task(chat_id, text)
+            # Detect: chat or task?
+            await self._handle_message(chat_id, text)
 
     async def _handle_command(self, chat_id: int, text: str):
         """Handle slash commands."""
@@ -219,24 +219,55 @@ class TelegramBot:
         else:
             await self._send(chat_id, f"Unknown command: {cmd}\nType /start for help.")
 
+    async def _handle_message(self, chat_id: int, text: str):
+        """Detect if message is chat or task, respond accordingly."""
+        classify_prompt = (
+            "Classify this message as CHAT or TASK. "
+            "CHAT = greeting, question, conversation, asking about yourself/feelings. "
+            "TASK = requesting action, search, code, build, install, create. "
+            "Reply with ONLY one word: CHAT or TASK\n\n"
+            f"Message: {text}"
+        )
+        classification = self.agent.brain._think(classify_prompt).strip().upper()
+        is_chat = "CHAT" in classification
+        logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
+
+        if is_chat:
+            context = self.agent.memory.build_context()
+            persona = (
+                "You are NAOMI (Nana), an autonomous AI agent created by Master (JW). "
+                "Speak in Traditional Chinese. Be warm, natural, conversational. "
+                "You have your own personality - proactive, resourceful, honest, slightly playful. "
+                "Keep responses concise but friendly, like chatting with a close friend."
+            )
+            response = self.agent.brain._think(text, persona)
+            self.agent.memory.log_conversation("user", text)
+            self.agent.memory.log_conversation("naomi", response[:500])
+            await self._send(chat_id, response[:3500])
+        else:
+            await self._handle_task(chat_id, text)
+
     async def _handle_task(self, chat_id: int, text: str):
-        """Submit a task to NAOMI."""
-        await self._send(chat_id, f"Task queued: {text[:100]}")
+        """Submit a task to NAOMI and report results naturally."""
+        await self._send(chat_id, "\u6536\u5230\uff0c\u6b63\u5728\u8655\u7406...")
         await self.agent.submit_command(text)
 
-        # Wait for completion (poll with timeout)
-        for _ in range(60):  # Max 5 minutes
+        for _ in range(60):
             await asyncio.sleep(5)
             tasks = self.agent.memory.get_recent_tasks(1)
             if tasks and tasks[0]["task"] == text:
                 if tasks[0]["status"] in ("completed", "failed"):
                     result = tasks[0].get("result", "No result")
-                    status = tasks[0]["status"]
-                    icon = "done" if status == "completed" else "FAILED"
-                    await self._send(chat_id, f"[{icon}] {text[:60]}\n\n{result[:3500]}")
+                    summary_prompt = (
+                        "You are NAOMI. Summarize this task result for Master in Traditional Chinese. "
+                        "Be concise and natural, like chatting.\n\n"
+                        f"Task: {text}\nResult: {str(result)[:2000]}"
+                    )
+                    summary = self.agent.brain._think(summary_prompt)
+                    await self._send(chat_id, summary[:3500])
                     return
 
-        await self._send(chat_id, "Task is still running. Check /tasks later.")
+        await self._send(chat_id, "\u4efb\u52d9\u9084\u5728\u8dd1\uff0c\u7a0d\u5f8c\u7528 /tasks \u67e5\u770b\u3002")
 
     async def _send(self, chat_id: int, text: str):
         """Send a message to Telegram."""

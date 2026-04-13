@@ -256,6 +256,7 @@ class Brain:
         "ollama-gemma31b":("ollama",        "juilpark/gemma-4-31B-it-uncensored-heretic:q4_k_m", "Ollama Gemma 4 31B uncensored (local, heavy)"),
         "ollama-glm":     ("ollama",        "glm-4.7-flash:q8_0",        "Ollama GLM 4.7 Flash (local, 30GB)"),
         "ollama-dolphin":  ("ollama",       "dolphin-llama3:8b",          "Ollama Dolphin Llama3 8B (local, fast)"),
+        "ollama-coder":   ("ollama",        "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest", "OmniCoder 9B uncensored (private coding)"),
         "minimax":        ("minimax",       "MiniMax-M2.7",               "MiniMax M2.7 (fallback)"),
         "auto":           ("auto",          None,                         "Auto: CLI → Ollama → GLM → MiniMax"),
     }
@@ -918,6 +919,7 @@ class Brain:
             "gemma31b": "ollama-gemma31b", "gemma-31b": "ollama-gemma31b", "gemma-big": "ollama-gemma31b",
             "dolphin": "ollama-dolphin", "llama": "ollama-dolphin",
             "glm-local": "ollama-glm", "glm4.7": "ollama-glm",
+            "coder": "ollama-coder", "omnicoder": "ollama-coder",
         }
         name = aliases.get(name, name)
 
@@ -1063,7 +1065,8 @@ class Brain:
 
     # Privacy mode: when True, ALL messages go to local Ollama only (nothing leaves machine)
     _private_mode = False
-    _private_model = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b"
+    _private_model = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b"  # Chat
+    _private_code_model = "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest"  # Code
 
     def set_private_mode(self, enabled: bool, model: str = None) -> Dict[str, Any]:
         """Toggle privacy mode — all traffic stays local when enabled."""
@@ -1091,9 +1094,9 @@ class Brain:
             "script", "api", "server", "deploy", "database",
         ]
         if any(sig in prompt_lower for sig in code_signals):
-            return "code"  # Always CLI, even in private mode
+            return "private_code" if self._private_mode else "code"
         if len(prompt) > 500:
-            return "code"
+            return "private_code" if self._private_mode else "code"
         return "private" if self._private_mode else "chat"
 
     def think_smart(self, prompt: str, context: str = "") -> str:
@@ -1107,18 +1110,30 @@ class Brain:
         system = ("You are NAOMI, an autonomous AI agent. "
                   "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
 
-        # Private mode — chat stays local, code still goes to CLI
+        # Private mode chat — Gemma local
         if complexity == "private":
             result = self._call_ollama(full, system, model=self._private_model)
             if result:
-                logger.debug(f"Smart route: private chat → Ollama {self._private_model}")
+                logger.debug(f"Smart route: private chat → {self._private_model}")
                 return result
             result = self._call_ollama(full, system)
             if result:
                 return result
             return "[Private mode: Ollama not available. Use /private off to disable.]"
 
-        # Chat — MiniMax first (Master's preference), then Ollama, then CLI
+        # Private mode code — OmniCoder local
+        if complexity == "private_code":
+            result = self._call_ollama(full, system, model=self._private_code_model)
+            if result:
+                logger.debug(f"Smart route: private code → {self._private_code_model}")
+                return result
+            # Fallback: try default ollama
+            result = self._call_ollama(full, system)
+            if result:
+                return result
+            return "[Private mode: Ollama not available. Use /private off to disable.]"
+
+        # Public chat — MiniMax (Master's preference)
         if complexity == "chat":
             if self._minimax_key and self._is_backend_available("minimax"):
                 result = self._call_minimax(full, system)
@@ -1132,7 +1147,7 @@ class Brain:
                     logger.debug("Smart route: chat → Ollama (MiniMax failed)")
                     return result
 
-        # Code / heavy — Claude CLI (strongest, even in private mode)
+        # Public code — Claude CLI (strongest)
         return self._think(full, system)
 
     # === High-level methods ===

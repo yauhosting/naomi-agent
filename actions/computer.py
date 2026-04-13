@@ -389,10 +389,14 @@ set position of first window to {{{x}, {y}}}'])
 tell application "System Events"
     set windowList to {}
     repeat with proc in (every process whose visible is true)
-        set procName to name of proc
-        repeat with w in (every window of proc)
-            set windowList to windowList & {procName & ": " & name of w}
-        end repeat
+        try
+            set procName to name of proc
+            repeat with w in (every window of proc)
+                try
+                    set windowList to windowList & {procName & ": " & name of w}
+                end try
+            end repeat
+        end try
     end repeat
     return windowList
 end tell

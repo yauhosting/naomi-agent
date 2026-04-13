@@ -260,11 +260,12 @@ class TelegramBot:
                 "Keep responses concise, like chatting with someone you care about."
             )
             await self._send_typing(chat_id)
-            # Recall relevant memories to get smarter over time
-            relevant = self.agent.memory.recall_long(query=text[:50], limit=3)
+            # Recall relevant memories using semantic search (Claude Code style: top-5)
+            relevant = self.agent.memory.semantic_search(text, limit=5)
             if relevant:
-                mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:100]}' for m in relevant)
-                persona += chr(10) + 'Your memories: ' + mem_hints
+                mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:150]}' for m in relevant)
+                persona += chr(10) + 'Your relevant memories about this topic:' + chr(10) + mem_hints
+                persona += chr(10) + 'Use these memories to give a smarter, more personalized response.'
             response = self.agent.brain._think(text, persona)
             self.agent.memory.log_conversation("user", text)
             self.agent.memory.log_conversation("naomi", response[:500])

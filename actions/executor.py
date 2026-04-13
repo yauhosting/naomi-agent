@@ -127,20 +127,18 @@ class ActionExecutor:
         return result
 
     def web_search(self, query: str) -> Dict[str, Any]:
-        """Search the web using DuckDuckGo."""
+        """Search the web using DuckDuckGo (ddgs package)."""
         try:
-            from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=5))
+            from ddgs import DDGS
+            results = DDGS().text(query, max_results=5)
             return {
                 "success": True,
                 "results": results,
                 "query": query,
             }
         except ImportError:
-            # Auto-install duckduckgo-search
-            self.pip_install("duckduckgo-search")
-            return self.web_search(query)  # Retry
+            self.pip_install("ddgs")
+            return self.web_search(query)
         except Exception as e:
             return {"error": str(e), "success": False}
 

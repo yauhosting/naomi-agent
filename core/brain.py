@@ -89,12 +89,23 @@ class Brain:
             if system_prompt:
                 body["system"] = system_prompt
 
-            resp = httpx.post(
-                f"{base_url}/messages",
-                headers=headers,
-                json=body,
-                timeout=90,
-            )
+            # Retry up to 3 times for transient errors (429, 529)
+            resp = None
+            for attempt in range(3):
+                resp = httpx.post(
+                    f"{base_url}/messages",
+                    headers=headers,
+                    json=body,
+                    timeout=90,
+                )
+                if resp.status_code == 200:
+                    break
+                if resp.status_code in (429, 529):
+                    wait = (attempt + 1) * 5
+                    logger.warning(f"MiniMax {resp.status_code}, retrying in {wait}s (attempt {attempt+1}/3)")
+                    time.sleep(wait)
+                else:
+                    break
 
             if resp.status_code != 200:
                 logger.error(f"MiniMax API error {resp.status_code}: {resp.text[:300]}")

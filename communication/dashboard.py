@@ -38,6 +38,8 @@ def create_dashboard(agent) -> FastAPI:
                 "skills": len(agent.memory.recall_skill() or []),
             },
             "tools": agent.tool_manager.list_tools(),
+            "compaction": agent.compaction.get_status() if hasattr(agent, 'compaction') else {},
+            "memory_agent": agent.memory_agent.get_status() if hasattr(agent, 'memory_agent') else {},
             "timestamp": time.time(),
         }
 

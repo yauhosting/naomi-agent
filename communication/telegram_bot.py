@@ -271,8 +271,12 @@ class TelegramBot:
             self.agent.memory.log_conversation("naomi", response[:500])
             await self._send(chat_id, response[:3500])
 
-            # Background: learn from this conversation
+            # Background: extract memories via sub-agent + learn from chat
             import asyncio as _asyncio
+            if hasattr(self.agent, 'memory_agent'):
+                _asyncio.create_task(
+                    self.agent.memory_agent.on_conversation_turn(text, response)
+                )
             _asyncio.create_task(self._learn_from_chat(chat_id, text, response))
         else:
             await self._handle_task(chat_id, text)

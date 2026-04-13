@@ -30,6 +30,8 @@ from core.memory import Memory
 from core.heartbeat import Heartbeat
 from core.personality import NAOMI_IDENTITY, SYSTEM_PROMPT
 from core.evolution import SelfEvolution, AgentCouncil
+from core.compaction import CompactionEngine
+from core.memory_agent import MemoryExtractionAgent
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -93,6 +95,8 @@ class NAOMIAgent:
         self.tool_manager = ToolManager(self.memory, self.actions)
         self.evolution = SelfEvolution(self.brain, self.memory, PROJECT_DIR)
         self.council = AgentCouncil(self.brain)
+        self.compaction = CompactionEngine(self.memory, self.brain)
+        self.memory_agent = MemoryExtractionAgent(self.brain, self.memory)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

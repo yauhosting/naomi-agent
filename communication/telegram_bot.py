@@ -654,13 +654,29 @@ class TelegramBot:
         )
 
         try:
-            # Run agent loop directly (not via command queue)
+            # Send typing indicator periodically while task runs
+            typing_active = True
+            async def keep_typing():
+                while typing_active:
+                    try:
+                        await self._send_typing(chat_id)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+
+            typing_task = asyncio.create_task(keep_typing())
+
+            # Run agent loop
             result = await self.agent.brain.agent_loop(
                 task=text,
                 executor=self.agent.actions,
                 system_prompt=system,
                 max_iterations=15,
             )
+
+            # Stop typing indicator
+            typing_active = False
+            typing_task.cancel()
 
             # Stream progress: show each step
             steps = result.get("steps", [])

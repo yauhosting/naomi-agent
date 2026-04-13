@@ -581,8 +581,12 @@ class Brain:
 
         logger.info(f"CLI agent loop: {task[:100]}")
 
-        response = self._call_claude_cli(
-            task, system_prompt=sys, json_schema=result_schema,
+        # Run blocking CLI call in thread executor to not block event loop
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._call_claude_cli(task, system_prompt=sys, json_schema=result_schema),
         )
 
         if not response:

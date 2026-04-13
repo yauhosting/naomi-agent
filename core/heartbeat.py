@@ -645,22 +645,30 @@ If multiple commands, separate with &&."""
                 + "\n".join(f"- {e['content'][:60]}" for e in recent_errors[:3])
             )
 
-        # Trigger evolution cycle every self-check (hourly)
-        try:
-            logger.info("Triggering auto-evolution cycle...")
-            result = self.agent.evolution.evolution_cycle()
-            if result.get("bugs_found", 0) > 0:
-                bugs = result.get("bugs_found", 0)
-                fixes = result.get("fixes_attempted", 0)
-                self.agent.memory.remember_short(
-                    f"Evolution: found {bugs} bugs, fixed {fixes}",
-                    category="evolution"
-                )
-                await self._notify_master(
-                    f"🔧 Self-evolution: found {bugs} bugs, attempted {fixes} fixes"
-                )
-        except Exception as e:
-            logger.error(f"Evolution cycle error: {e}")
+        # Trigger evolution cycle in background thread (doesn't block event loop)
+        import threading
+        def _run_evolution():
+            try:
+                logger.info("Triggering auto-evolution cycle (background)...")
+                result = self.agent.evolution.evolution_cycle()
+                if result.get("bugs_found", 0) > 0:
+                    bugs = result.get("bugs_found", 0)
+                    fixes = result.get("fixes_attempted", 0)
+                    self.agent.memory.remember_short(
+                        f"Evolution: found {bugs} bugs, fixed {fixes}",
+                        category="evolution"
+                    )
+                    # Schedule notification (can't await from thread)
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self._notify_master(f"🔧 Self-evolution: {bugs} bugs, {fixes} fixes"),
+                            loop,
+                        )
+            except Exception as e:
+                logger.error(f"Evolution cycle error: {e}")
+
+        threading.Thread(target=_run_evolution, daemon=True).start()
 
     def stop(self):
         self.running = False

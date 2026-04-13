@@ -145,6 +145,22 @@ class NAOMIAgent:
         # Start heartbeat (main life loop)
         heartbeat_task = asyncio.create_task(self.heartbeat.start())
 
+        # Start Telegram bot if configured
+        telegram_task = None
+        tg_config = self.config.get("telegram", {})
+        if tg_config.get("enabled"):
+            import os as _os
+            from core.brain import load_dotenv
+            load_dotenv(_os.path.join(PROJECT_DIR, ".env"))
+            tg_token = _os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            tg_master = tg_config.get("master_id", 0)
+            if tg_token and tg_master:
+                from communication.telegram_bot import TelegramBot
+                self.telegram = TelegramBot(self, tg_token, tg_master)
+                telegram_task = asyncio.create_task(self.telegram.start())
+                self.logger.info(f"Telegram bot started for master {tg_master}")
+
+
         self.logger.info(f"Dashboard: http://0.0.0.0:{dashboard_config.get('port', 18802)}")
         self.logger.info("NAOMI is alive and running!")
 
@@ -157,7 +173,10 @@ class NAOMIAgent:
 
         # Wait for shutdown
         try:
-            await asyncio.gather(heartbeat_task, dashboard_task)
+            tasks = [heartbeat_task, dashboard_task]
+            if telegram_task:
+                tasks.append(telegram_task)
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             self.logger.info("Shutdown signal received")
             self.heartbeat.stop()

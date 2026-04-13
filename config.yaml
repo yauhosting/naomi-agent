@@ -47,3 +47,7 @@ logging:
   level: "INFO"
   file: "data/naomi.log"
   max_size: "10MB"
+
+telegram:
+  enabled: true
+  master_id: 5197390147

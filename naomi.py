@@ -21,9 +21,16 @@ import yaml
 import logging
 from logging.handlers import RotatingFileHandler
 
-# Add project root to path
+# Track handlers created by setup_logging so we only remove our own
+_owned_handlers: list[logging.Handler] = []
+
+_VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+# Add project root to path (guarded so duplicate entries are never created
+# when naomi.py is imported as a module rather than run as a script).
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, PROJECT_DIR)
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
 
 from core.brain import Brain
 from core.memory import Memory
@@ -39,7 +46,8 @@ from core.project import ProjectPipeline
 from actions.executor import ActionExecutor, ToolManager
 
 
-def setup_logging(config: dict):
+def setup_logging(config: dict) -> None:
+    """Configure logging with rotation. Safe to call multiple times."""
     log_config = config.get("logging", {})
     log_file = os.path.join(PROJECT_DIR, log_config.get("file", "data/naomi.log"))
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -48,6 +56,14 @@ def setup_logging(config: dict):
         "[%(asctime)s] %(name)-20s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
+
+    root_logger = logging.getLogger()
+
+    # Remove only handlers that we previously added (preserve third-party handlers)
+    for handler in _owned_handlers:
+        root_logger.removeHandler(handler)
+        handler.close()
+    _owned_handlers.clear()
 
     # File handler with rotation
     file_handler = RotatingFileHandler(
@@ -59,10 +75,38 @@ def setup_logging(config: dict):
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, log_config.get("level", "INFO")))
+    # Validate log level to avoid arbitrary attribute access on the logging module
+    raw_level = log_config.get("level", "INFO")
+    level_name = raw_level.upper() if isinstance(raw_level, str) else "INFO"
+    if level_name not in _VALID_LOG_LEVELS:
+        logging.warning("Invalid log level %r — falling back to INFO", raw_level)
+        level_name = "INFO"
+
+    root_logger.setLevel(getattr(logging, level_name))
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
+
+    # Track handlers we own so we can safely remove only these on next call
+    _owned_handlers.extend([file_handler, console_handler])
+
+
+def load_config(config_path: str) -> dict:
+    """Load and validate YAML config, returning defaults on failure."""
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        logging.warning("Config file not found: %s — using defaults", config_path)
+        return {}
+    except yaml.YAMLError as exc:
+        logging.error("Malformed YAML in %s: %s — using defaults", config_path, exc)
+        return {}
+
+    if not isinstance(config, dict):
+        logging.warning("Config root is not a mapping in %s — using defaults", config_path)
+        return {}
+
+    return config
 
 
 class NAOMIAgent:
@@ -82,10 +126,9 @@ class NAOMIAgent:
         self.start_time = time.time()
         self.logger = logging.getLogger("naomi.agent")
 
-        # Load config
+        # Load config with error handling
         config_file = os.path.join(PROJECT_DIR, config_path)
-        with open(config_file, 'r') as f:
-            self.config = yaml.safe_load(f)
+        self.config = load_config(config_file)
 
         self.logger.info(f"=== NAOMI {NAOMI_IDENTITY['version']} Starting ===")
         self.logger.info(f"Project dir: {PROJECT_DIR}")
@@ -210,10 +253,9 @@ class NAOMIAgent:
 
 
 def main():
-    # Load config for logging setup
+    # Load config for logging setup (with error handling)
     config_path = os.path.join(PROJECT_DIR, "config.yaml")
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config(config_path)
     setup_logging(config)
 
     agent = NAOMIAgent()

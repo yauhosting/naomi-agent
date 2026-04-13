@@ -76,6 +76,17 @@ class TelegramBot:
         if not text:
             return
 
+        # Extract reply context — if user replied to a previous message, include it
+        reply_context = ""
+        reply_to = message.get("reply_to_message")
+        if reply_to:
+            reply_text = reply_to.get("text", "")
+            reply_from = reply_to.get("from", {}).get("first_name", "")
+            if reply_text:
+                reply_context = f"[Replying to {reply_from}: {reply_text[:500]}]\n\n"
+                text = reply_context + text
+                logger.info(f"Reply context included ({len(reply_text)} chars)")
+
         logger.info(f"Master command: {text[:100]}")
 
         # Handle commands
@@ -609,14 +620,14 @@ class TelegramBot:
             await self._send_typing(chat_id)
 
             # Multi-turn context: include recent conversation history
-            recent_convs = self.agent.memory.get_conversations(limit=10)
+            recent_convs = self.agent.memory.get_conversations(limit=30)
             conv_history = ""
             if recent_convs:
                 conv_lines = []
                 for c in recent_convs:
                     role = "Master" if c["role"] == "user" else "NAOMI"
                     conv_lines.append(f"{role}: {c['content'][:200]}")
-                conv_history = "\n".join(conv_lines[-8:])  # Last 8 messages
+                conv_history = "\n".join(conv_lines[-20:])  # Last 20 messages for context
                 persona += "\n\nRecent conversation:\n" + conv_history
 
             # Recall relevant memories using semantic search

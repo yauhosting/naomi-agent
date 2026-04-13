@@ -33,6 +33,7 @@ from core.evolution import SelfEvolution, AgentCouncil
 from core.compaction import CompactionEngine
 from core.memory_agent import MemoryExtractionAgent
 from core.discovery import CapabilityDiscovery
+from core.skills import SkillManager
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -99,6 +100,7 @@ class NAOMIAgent:
         self.compaction = CompactionEngine(self.memory, self.brain)
         self.memory_agent = MemoryExtractionAgent(self.brain, self.memory)
         self.discovery = CapabilityDiscovery(self.brain, self.memory, self.actions, PROJECT_DIR)
+        self.skills = SkillManager(brain=self.brain)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

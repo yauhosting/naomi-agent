@@ -257,12 +257,24 @@ class TelegramBot:
             )
 
         elif cmd == "/skills":
-            skills = self.agent.memory.recall_skill()
-            if not skills or (isinstance(skills, list) and len(skills) == 0):
+            lines = []
+            # Learned skills (SKILL.md files)
+            if hasattr(self.agent, 'skills'):
+                learned = self.agent.skills.list_skills()
+                if learned:
+                    lines.append("📚 Learned Skills:")
+                    for s in learned:
+                        lines.append(f"  {s['name']}: {s.get('description','')[:50]}")
+            # Installed packages (DB)
+            db_skills = self.agent.memory.recall_skill()
+            if db_skills and isinstance(db_skills, list) and len(db_skills) > 0:
+                lines.append("\n📦 Installed Packages:")
+                for s in db_skills[:15]:
+                    lines.append(f"  {s['name']}: {s.get('description','')[:50]}")
+            if not lines:
                 await self._send(chat_id, "No skills learned yet.")
                 return
-            lines = [f"- {s['name']}: {s.get('description','')[:50]}" for s in (skills if isinstance(skills, list) else [])]
-            await self._send(chat_id, "Learned Skills:\n" + "\n".join(lines[:20]))
+            await self._send(chat_id, "\n".join(lines))
 
         elif cmd == "/think":
             if not args:

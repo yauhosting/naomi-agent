@@ -157,6 +157,23 @@ class Heartbeat:
                     f"Task: {command[:100]}", str(result)[:1000],
                     category="task_result", importance=7
                 )
+
+                # Self-learning: extract skill from completed complex tasks
+                if isinstance(result, dict) and hasattr(self.agent, 'skills'):
+                    steps = result.get("steps", [])
+                    if len(steps) >= 3 and result.get("success"):
+                        try:
+                            skill_result = self.agent.skills.extract_skill_from_task(
+                                command, steps, str(result.get("result", ""))
+                            )
+                            if skill_result and skill_result.get("success"):
+                                logger.info(f"Skill learned: {skill_result['name']}")
+                                await self._notify_master(
+                                    f"💡 新技能學會: {skill_result['name']}\n"
+                                    f"{skill_result.get('description', '')}"
+                                )
+                        except Exception as e:
+                            logger.debug(f"Skill extraction error: {e}")
             else:
                 # Result is suspicious — mark as failed, not completed
                 logger.warning(f"Result validation FAILED: {validated['reason']}")
@@ -264,12 +281,19 @@ class Heartbeat:
         """
         logger.info("Handling as ACTION task (native tool_use agent loop)")
 
+        # Inject relevant skills into context
+        skill_context = ""
+        if hasattr(self.agent, 'skills'):
+            skill_context = self.agent.skills.get_skill_context(command)
+
         system = (
             "You are NAOMI, an autonomous AI agent on macOS. "
             f"Context:\n{context[:1500]}\n\n"
-            "Use tools to complete the task. Do NOT describe — execute. "
+            f"{skill_context}\n\n" if skill_context else
+            "You are NAOMI, an autonomous AI agent on macOS. "
+            f"Context:\n{context[:1500]}\n\n"
+        ) + "Use tools to complete the task. Do NOT describe — execute. " \
             "When finished, call the task_complete tool with a summary."
-        )
 
         result = await self.agent.brain.agent_loop(
             task=command,

@@ -6,6 +6,7 @@ Only responds to authorized user (Master).
 import asyncio
 import json
 import time
+import os
 import logging
 import httpx
 from typing import Optional
@@ -750,6 +751,17 @@ class TelegramBot:
             else:
                 status = "完成" if result.get("success") else "失敗"
                 await self._send(chat_id, f"任務{status}（{len(steps)} 步）")
+
+            # Auto-detect and send any image files mentioned in results
+            import re as _re
+            all_text = json.dumps(result, default=str)
+            image_paths = _re.findall(r'(/[\w/\-_.]+\.(?:png|jpg|jpeg|gif|webp))', all_text)
+            for img_path in image_paths[:3]:  # Max 3 images
+                if os.path.exists(img_path):
+                    try:
+                        await self._send_photo(chat_id, img_path, caption=os.path.basename(img_path))
+                    except Exception as img_err:
+                        logger.debug(f"Failed to send image {img_path}: {img_err}")
 
             self.agent.memory.log_conversation("naomi", str(result.get("result", ""))[:500])
             self.agent.memory.remember_long(

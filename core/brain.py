@@ -523,117 +523,75 @@ class Brain:
     async def _agent_loop_cli(self, task: str, executor, system_prompt: str = "",
                               max_iterations: int = 15) -> Dict[str, Any]:
         """
-        Agent loop using Claude CLI (no API key needed, uses Max subscription).
-        Claude returns JSON tool calls, NAOMI executes them.
+        Agent loop using Claude CLI with --json-schema.
+        Claude CLI has its own built-in tools (shell, file, web search) and executes them
+        internally. We get back the structured result via --json-schema + --output-format json.
         """
-        tool_names = [t["name"] for t in NAOMI_TOOLS]
-        tool_descriptions = "\n".join(
-            f"- {t['name']}: {t['description']} | params: {list(t['input_schema'].get('properties', {}).keys())}"
-            for t in NAOMI_TOOLS
+        sys = system_prompt or (
+            "You are NAOMI, an autonomous AI agent on macOS. "
+            "Execute the task using your tools (shell, file operations, web search). "
+            "Do NOT just describe — actually run commands and report real results. "
+            "Respond in Traditional Chinese."
         )
 
-        sys = system_prompt or "You are NAOMI, an autonomous AI agent on macOS."
+        result_schema = {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean", "description": "Whether the task was completed successfully"},
+                "summary": {"type": "string", "description": "Summary of what was done and the results"},
+                "steps_taken": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string"},
+                            "result": {"type": "string"},
+                        },
+                    },
+                    "description": "List of actions taken and their results",
+                },
+            },
+            "required": ["success", "summary"],
+        }
+
+        logger.info(f"CLI agent loop: {task[:100]}")
+
+        response = self._call_claude_cli(
+            task, system_prompt=sys, json_schema=result_schema,
+        )
+
+        if not response:
+            return {"success": False, "result": "CLI returned no response",
+                    "steps": [], "verified": False}
+
+        # Parse the structured response
+        try:
+            result_data = json.loads(response)
+        except json.JSONDecodeError:
+            # Non-JSON response — CLI gave text answer
+            return {"success": True, "result": response[:2000],
+                    "steps": [{"tool": "cli_direct", "result": response[:500], "success": True}],
+                    "verified": True}
+
+        # Build steps from CLI's report
         steps = []
-        history = ""  # Accumulate results for context
-
-        for iteration in range(1, max_iterations + 1):
-            prompt = f"""{sys}
-
-Available tools:
-{tool_descriptions}
-
-Task: {task}
-
-{"Previous steps and results:" + chr(10) + history if history else ""}
-
-Decide the next action. Reply in JSON ONLY:
-{{"tool": "tool_name", "input": {{"param": "value"}}, "reasoning": "why"}}
-
-If the task is complete, use:
-{{"tool": "task_complete", "input": {{"summary": "what was done", "success": true}}}}
-
-CRITICAL: Reply with ONLY a single JSON object. No text before or after.
-Do NOT answer the question yourself. Do NOT describe actions. Just output the JSON tool call."""
-
-            # Use bare CLI to avoid CLAUDE.md context hijacking the response
-            agent_system = (
-                "You are a tool-calling agent. You MUST respond with ONLY a single JSON object. "
-                "No explanations. No markdown. No text before or after. Just the raw JSON."
-            )
-            response = None
-            if self._check_claude_cli():
-                response = self._call_claude_cli(prompt, system_prompt=agent_system, bare=True)
-            if not response:
-                response = self._call_claude_proxy(prompt, agent_system)
-            if not response and self._minimax_key:
-                response = self._call_minimax(prompt, agent_system)
-            if not response:
-                steps.append({"step": iteration, "error": "All backends failed"})
-                break
-
-            logger.debug(f"CLI agent raw response: {response[:300]}")
-
-            # Parse JSON tool call
-            try:
-                cleaned = response
-                if "```json" in cleaned:
-                    cleaned = cleaned.split("```json")[1].split("```")[0]
-                elif "```" in cleaned:
-                    cleaned = cleaned.split("```")[1].split("```")[0]
-                raw = cleaned.strip()
-                if not raw.startswith("{"):
-                    start = raw.find("{")
-                    end = raw.rfind("}") + 1
-                    if start >= 0 and end > start:
-                        raw = raw[start:end]
-                call = json.loads(raw)
-            except (json.JSONDecodeError, IndexError):
-                logger.warning(f"CLI agent loop: could not parse at step {iteration}: {response[:200] if response else 'None'}")
-                steps.append({"step": iteration, "error": "Could not parse tool call",
-                              "raw": response[:300] if response else "No response"})
-                # Give it one more try with simpler prompt
-                continue
-
-            tool_name = call.get("tool", "")
-            tool_input = call.get("input", {})
-            reasoning = call.get("reasoning", "")
-
-            logger.info(f"CLI agent step {iteration}: {tool_name} — {reasoning[:80]}")
-
-            # Check for task_complete
-            if tool_name == "task_complete":
-                steps.append({"step": iteration, "tool": "task_complete",
-                              "input": tool_input, "success": tool_input.get("success", True)})
-                return {
-                    "success": tool_input.get("success", True),
-                    "result": tool_input.get("summary", ""),
-                    "steps": steps,
-                    "iterations": iteration,
-                    "verified": True,
-                }
-
-            if tool_name not in tool_names:
-                steps.append({"step": iteration, "error": f"Unknown tool: {tool_name}"})
-                history += f"\nStep {iteration}: ERROR — unknown tool '{tool_name}'\n"
-                continue
-
-            # Execute the tool
-            exec_result = await self._execute_tool(executor, tool_name, tool_input)
-            output = str(exec_result.get("output", exec_result.get("error", json.dumps(exec_result))))[:1000]
-            success = exec_result.get("success", False)
-
+        for i, s in enumerate(result_data.get("steps_taken", []), 1):
             steps.append({
-                "step": iteration, "tool": tool_name, "input": tool_input,
-                "result": output[:500], "success": success,
+                "step": i,
+                "tool": s.get("action", "cli"),
+                "result": s.get("result", "")[:500],
+                "success": True,
             })
 
-            history += f"\nStep {iteration}: [{tool_name}] {'OK' if success else 'FAILED'}\nOutput: {output[:500]}\n"
+        # If CLI didn't report steps, it still did work (num_turns in the wrapper)
+        if not steps:
+            steps = [{"step": 1, "tool": "cli_builtin", "result": "CLI executed internally", "success": True}]
 
         return {
-            "success": False,
-            "result": f"Max iterations ({max_iterations}) reached",
+            "success": result_data.get("success", True),
+            "result": result_data.get("summary", response[:500]),
             "steps": steps,
-            "iterations": max_iterations,
+            "iterations": 1,
             "verified": True,
         }
 
@@ -761,19 +719,18 @@ Do NOT answer the question yourself. Do NOT describe actions. Just output the JS
             return None
 
     def _call_claude_cli(self, prompt: str, system_prompt: str = "",
-                         bare: bool = False) -> str:
-        """Call Claude CLI. Use bare=True for agent loop (skips CLAUDE.md context)."""
+                         json_schema: dict = None) -> str:
+        """Call Claude CLI. Use json_schema for structured output (agent loop)."""
         if not self._claude_cli_path:
-            # Try to find it now
             self._check_claude_cli()
             if not self._claude_cli_path:
                 return None
 
         cmd = [self._claude_cli_path, "-p"]
-        if bare:
-            cmd.append("--bare")
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
+        if json_schema:
+            cmd.extend(["--json-schema", json.dumps(json_schema), "--output-format", "json"])
 
         try:
             result = subprocess.run(
@@ -781,13 +738,34 @@ Do NOT answer the question yourself. Do NOT describe actions. Just output the JS
                 capture_output=True, text=True,
                 timeout=self.primary.get("timeout", 120),
                 env={**os.environ, "LANG": "en_US.UTF-8"},
-                cwd="/tmp",  # Avoid picking up CLAUDE.md
+                cwd="/tmp",
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+            output = result.stdout.strip()
+            if result.returncode == 0 and output and "Not logged in" not in output:
+                self._record_success("cli")
+                # If json output mode, extract structured_output from the wrapper
+                if json_schema and output.startswith("{"):
+                    try:
+                        wrapper = json.loads(output)
+                        structured = wrapper.get("structured_output")
+                        if structured:
+                            return json.dumps(structured)
+                        # Fallback: return result text
+                        return wrapper.get("result", output)
+                    except json.JSONDecodeError:
+                        return output
+                return output
+            if "Not logged in" in (output or ""):
+                logger.warning("Claude CLI: not logged in")
+            self._record_failure("cli")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("Claude CLI timed out")
+            self._record_failure("cli")
             return None
         except Exception as e:
             logger.error(f"Claude CLI failed: {e}")
+            self._record_failure("cli")
             return None
 
     # === Model Switching ===

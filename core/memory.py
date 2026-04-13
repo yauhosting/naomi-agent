@@ -263,11 +263,19 @@ class Memory:
         return {r['key']: r['value'] for r in rows}
 
     # === Task History ===
+    MAX_TASK_HISTORY = 200
+
     def add_task(self, task: str, brain_mode: str = "left") -> int:
         now = time.time()
         c = self.conn.execute(
             "INSERT INTO task_history (task, status, started_at, brain_mode) VALUES (?, 'running', ?, ?)",
             (task, now, brain_mode)
+        )
+        # Trim old task history
+        self.conn.execute(
+            "DELETE FROM task_history WHERE id NOT IN "
+            "(SELECT id FROM task_history ORDER BY id DESC LIMIT ?)",
+            (self.MAX_TASK_HISTORY,)
         )
         self.conn.commit()
         return c.lastrowid
@@ -295,10 +303,18 @@ class Memory:
         return [dict(r) for r in rows]
 
     # === Conversation Log ===
+    MAX_CONVERSATIONS = 500  # Keep last 500 conversations
+
     def log_conversation(self, role: str, content: str):
         self.conn.execute(
             "INSERT INTO conversations (role, content, timestamp) VALUES (?, ?, ?)",
             (role, content, time.time())
+        )
+        # Trim old conversations to prevent unbounded growth
+        self.conn.execute(
+            "DELETE FROM conversations WHERE id NOT IN "
+            "(SELECT id FROM conversations ORDER BY timestamp DESC LIMIT ?)",
+            (self.MAX_CONVERSATIONS,)
         )
         self.conn.commit()
 

@@ -149,10 +149,23 @@ class SkillManager:
             result=str(result)[:500],
         )
 
-        response = self.brain._call_claude_cli(prompt, system_prompt=(
-            "You are a skill extraction engine. Analyze completed tasks and output reusable skills as JSON. "
-            "Reply with ONLY JSON, no other text."
-        ), bare=True)
+        skill_schema = {
+            "type": "object",
+            "properties": {
+                "should_create": {"type": "boolean"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "prerequisites": {"type": "array", "items": {"type": "string"}},
+                "when_to_use": {"type": "string"},
+                "procedure": {"type": "string"},
+                "example_commands": {"type": "array", "items": {"type": "string"}},
+                "learned_from": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["should_create"],
+        }
+        response = self.brain._call_claude_cli(prompt, json_schema=skill_schema)
 
         if not response:
             return None

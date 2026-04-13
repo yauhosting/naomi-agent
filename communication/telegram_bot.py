@@ -106,6 +106,7 @@ class TelegramBot:
                 "/evolve - Trigger self-evolution\n"
                 "/shell <cmd> - Execute shell command\n"
                 "/schedule - Manage scheduled tasks\n"
+                "/project <goal> - Create & run a full project\n"
                 "/usage - Usage statistics\n"
                 "/screen - Take screenshot\n"
                 "/click x y - Click at coordinates\n"
@@ -329,6 +330,93 @@ class TelegramBot:
             result = await self.agent.execute_action("shell", args)
             output = result.get("output", result.get("error", "No output"))
             await self._send(chat_id, f"$ {args}\n\n{output[:3500]}")
+
+        elif cmd == "/project":
+            if not args:
+                # List projects
+                if hasattr(self.agent, 'project'):
+                    projects = self.agent.project.list_projects()
+                    if not projects:
+                        await self._send(chat_id,
+                            "沒有進行中的項目\n\n"
+                            "Usage: /project <goal>\n"
+                            "Example: /project 做一個卡牌遊戲\n"
+                            "Example: /project Build a weather dashboard web app"
+                        )
+                    else:
+                        lines = [f"[{p['status']}] {p['name']} ({p['progress']}) — {p['id']}" for p in projects]
+                        await self._send(chat_id,
+                            "Projects:\n" + "\n".join(lines) + "\n\n"
+                            "/project <goal> — Create new\n"
+                            "/project run <id> — Resume\n"
+                            "/project status <id> — Details"
+                        )
+                return
+
+            parts = args.split(None, 1)
+            sub = parts[0].lower() if parts else ""
+
+            if sub == "run" and len(parts) > 1:
+                pid = parts[1].strip()
+                await self._send(chat_id, f"▶️ Resuming project: {pid}")
+                result = await self.agent.project.run_all(
+                    pid, notify_callback=lambda msg: self._send(chat_id, msg)
+                )
+                status = "✅ 完成" if result.get("project_status") == "completed" else "⏸ 進行中"
+                await self._send(chat_id, f"{status} ({result.get('phases_executed', 0)} phases executed)")
+
+            elif sub == "status" and len(parts) > 1:
+                pid = parts[1].strip()
+                p = self.agent.project.get_project(pid)
+                if not p:
+                    await self._send(chat_id, f"Project not found: {pid}")
+                else:
+                    lines = []
+                    for ph in p["phases"]:
+                        icon = {"completed": "✅", "running": "🔄", "pending": "⬜", "needs_review": "⚠️"}.get(ph["status"], "?")
+                        lines.append(f"{icon} Phase {ph['id']}: {ph['name']}")
+                    await self._send(chat_id,
+                        f"📋 {p['name']}\n"
+                        f"Status: {p['status']}\n"
+                        f"Dir: {p['work_dir']}\n\n" + "\n".join(lines)
+                    )
+
+            elif sub == "rm" and len(parts) > 1:
+                self.agent.project.delete_project(parts[1].strip())
+                await self._send(chat_id, "已刪除")
+
+            else:
+                # Create + run new project
+                goal = args
+                await self._send(chat_id, f"🚀 Creating project: {goal}")
+                await self._send_typing(chat_id)
+
+                create_result = await self.agent.project.create(goal)
+                if not create_result.get("success"):
+                    await self._send(chat_id, f"❌ 創建失敗: {create_result.get('error', '?')}")
+                    return
+
+                pid = create_result["project_id"]
+                phase_list = "\n".join(f"  {i+1}. {n}" for i, n in enumerate(create_result["phase_names"]))
+                await self._send(chat_id,
+                    f"📋 Project: {create_result['name']}\n"
+                    f"ID: {pid}\n"
+                    f"Phases ({create_result['phases']}):\n{phase_list}\n\n"
+                    f"🔨 開始執行..."
+                )
+
+                # Run all phases
+                result = await self.agent.project.run_all(
+                    pid, notify_callback=lambda msg: self._send(chat_id, msg)
+                )
+
+                status = "✅ 項目完成！" if result.get("project_status") == "completed" else "⏸ 部分完成"
+                await self._send(chat_id,
+                    f"{status}\n"
+                    f"Phases: {result.get('phases_executed', 0)} executed\n"
+                    f"Dir: {create_result['work_dir']}\n\n"
+                    f"用 /project status {pid} 查看詳情"
+                )
 
         elif cmd == "/usage":
             usage = self.agent.brain.get_usage()

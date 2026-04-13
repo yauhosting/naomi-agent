@@ -35,6 +35,7 @@ from core.memory_agent import MemoryExtractionAgent
 from core.discovery import CapabilityDiscovery
 from core.skills import SkillManager
 from core.scheduler import Scheduler
+from core.project import ProjectPipeline
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -103,6 +104,7 @@ class NAOMIAgent:
         self.discovery = CapabilityDiscovery(self.brain, self.memory, self.actions, PROJECT_DIR)
         self.skills = SkillManager(brain=self.brain)
         self.scheduler = Scheduler()
+        self.project = ProjectPipeline(self.brain, self.actions)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

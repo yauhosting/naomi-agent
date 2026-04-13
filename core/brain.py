@@ -747,7 +747,11 @@ class Brain:
 
     def _call_glm(self, prompt: str, system_prompt: str = "",
                    model: str = None) -> str:
-        """Call Z.AI GLM API (OpenAI-compatible format)."""
+        """Call Z.AI GLM API (OpenAI-compatible format).
+        Note: GLM Coding Plan only works through Coding tools (Claude Code/OpenClaw).
+        This method requires regular API balance (not Coding Plan).
+        Use /model glm only if you have topped up API credits at z.ai.
+        """
         import httpx
         if not self._glm_key:
             return None

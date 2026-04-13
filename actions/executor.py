@@ -35,6 +35,8 @@ class ActionExecutor:
             "key_press": self._do_key,
             "open_app": self._do_open_app,
             "look_and_act": self._do_look_and_act,
+            "web_fetch": self.web_fetch,
+            "scroll": self._do_scroll,
         }
         self._brain = brain
 
@@ -187,6 +189,54 @@ class ActionExecutor:
             return self.web_search(query)
         except Exception as e:
             return {"error": str(e), "success": False, "results": []}
+
+    def web_fetch(self, url: str) -> Dict[str, Any]:
+        """Fetch a web page and extract text content."""
+        logger.info(f"Fetching: {url[:100]}")
+        try:
+            import httpx
+            from bs4 import BeautifulSoup
+
+            headers = {"User-Agent": "NAOMI-Agent/0.4 (compatible; Bot)"}
+            resp = httpx.get(url.strip(), headers=headers, timeout=30, follow_redirects=True)
+
+            if resp.status_code != 200:
+                return {"success": False, "error": f"HTTP {resp.status_code}", "url": url}
+
+            content_type = resp.headers.get("content-type", "")
+
+            if "text/html" in content_type or "text/plain" in content_type:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                # Remove script/style tags
+                for tag in soup(["script", "style", "nav", "footer", "header"]):
+                    tag.decompose()
+                text = soup.get_text(separator="\n", strip=True)
+                # Get title
+                title = soup.title.string if soup.title else ""
+                return {
+                    "success": True,
+                    "url": url,
+                    "title": title,
+                    "content": text[:10000],
+                    "length": len(text),
+                }
+            elif "application/json" in content_type:
+                return {"success": True, "url": url, "content": resp.text[:10000], "type": "json"}
+            else:
+                return {"success": True, "url": url, "content": resp.text[:5000],
+                        "type": content_type, "length": len(resp.text)}
+
+        except ImportError:
+            self.pip_install("beautifulsoup4")
+            return self.web_fetch(url)
+        except Exception as e:
+            return {"error": str(e), "success": False, "url": url}
+
+    def _do_scroll(self, params: str) -> Dict[str, Any]:
+        parts = params.split()
+        direction = parts[0] if parts else "down"
+        amount = int(parts[1]) if len(parts) > 1 else 3
+        return self._get_computer().scroll(direction, amount)
 
 
 class ToolManager:

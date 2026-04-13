@@ -173,6 +173,29 @@ NAOMI_TOOLS = [
         }
     },
     {
+        "name": "web_fetch",
+        "description": "Fetch a web page URL and extract its text content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"}
+            },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "scroll",
+        "description": "Scroll the screen up or down.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "enum": ["up", "down"], "description": "Scroll direction"},
+                "amount": {"type": "integer", "description": "Number of scroll ticks (default 3)"}
+            },
+            "required": ["direction"]
+        }
+    },
+    {
         "name": "task_complete",
         "description": "Report that the task is complete. Call this when you have finished all actions.",
         "input_schema": {
@@ -520,20 +543,35 @@ Decide the next action. Reply in JSON ONLY:
 If the task is complete, use:
 {{"tool": "task_complete", "input": {{"summary": "what was done", "success": true}}}}
 
-RULES:
-- Use exactly ONE tool per response
-- Do NOT describe what you would do — call the tool
-- Do NOT make up results — wait for real output"""
+CRITICAL: Reply with ONLY a single JSON object. No text before or after.
+Do NOT answer the question yourself. Do NOT describe actions. Just output the JSON tool call."""
 
-            response = self._think(prompt)
+            # Use bare CLI to avoid CLAUDE.md context hijacking the response
+            agent_system = (
+                "You are a tool-calling agent. You MUST respond with ONLY a single JSON object. "
+                "No explanations. No markdown. No text before or after. Just the raw JSON."
+            )
+            response = None
+            if self._check_claude_cli():
+                response = self._call_claude_cli(prompt, system_prompt=agent_system, bare=True)
+            if not response:
+                response = self._call_claude_proxy(prompt, agent_system)
+            if not response and self._minimax_key:
+                response = self._call_minimax(prompt, agent_system)
+            if not response:
+                steps.append({"step": iteration, "error": "All backends failed"})
+                break
+
+            logger.debug(f"CLI agent raw response: {response[:300]}")
 
             # Parse JSON tool call
             try:
-                if "```json" in response:
-                    response = response.split("```json")[1].split("```")[0]
-                elif "```" in response:
-                    response = response.split("```")[1].split("```")[0]
-                raw = response.strip()
+                cleaned = response
+                if "```json" in cleaned:
+                    cleaned = cleaned.split("```json")[1].split("```")[0]
+                elif "```" in cleaned:
+                    cleaned = cleaned.split("```")[1].split("```")[0]
+                raw = cleaned.strip()
                 if not raw.startswith("{"):
                     start = raw.find("{")
                     end = raw.rfind("}") + 1
@@ -541,9 +579,9 @@ RULES:
                         raw = raw[start:end]
                 call = json.loads(raw)
             except (json.JSONDecodeError, IndexError):
-                logger.warning(f"CLI agent loop: could not parse response at step {iteration}")
+                logger.warning(f"CLI agent loop: could not parse at step {iteration}: {response[:200] if response else 'None'}")
                 steps.append({"step": iteration, "error": "Could not parse tool call",
-                              "raw": response[:300]})
+                              "raw": response[:300] if response else "No response"})
                 # Give it one more try with simpler prompt
                 continue
 
@@ -617,6 +655,12 @@ RULES:
                 return await executor.execute("pip_install", tool_input["package"])
             elif tool_name == "git":
                 return await executor.execute("git", tool_input["command"])
+            elif tool_name == "web_fetch":
+                return await executor.execute("web_fetch", tool_input["url"])
+            elif tool_name == "scroll":
+                direction = tool_input.get("direction", "down")
+                amount = tool_input.get("amount", 3)
+                return await executor.execute("scroll", f"{direction} {amount}")
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -707,16 +751,28 @@ RULES:
             logger.error(f"Claude proxy failed: {e}")
             return None
 
-    def _call_claude_cli(self, prompt: str, system_prompt: str = "") -> str:
+    def _call_claude_cli(self, prompt: str, system_prompt: str = "",
+                         bare: bool = False) -> str:
+        """Call Claude CLI. Use bare=True for agent loop (skips CLAUDE.md context)."""
         if not self._claude_cli_path:
-            return None
-        full_prompt = f"[System: {system_prompt}]\n\n{prompt}" if system_prompt else prompt
+            # Try to find it now
+            self._check_claude_cli()
+            if not self._claude_cli_path:
+                return None
+
+        cmd = [self._claude_cli_path, "-p"]
+        if bare:
+            cmd.append("--bare")
+        if system_prompt:
+            cmd.extend(["--system-prompt", system_prompt])
+
         try:
             result = subprocess.run(
-                [self._claude_cli_path, "-p", full_prompt],
+                cmd + [prompt],
                 capture_output=True, text=True,
                 timeout=self.primary.get("timeout", 120),
                 env={**os.environ, "LANG": "en_US.UTF-8"},
+                cwd="/tmp",  # Avoid picking up CLAUDE.md
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()

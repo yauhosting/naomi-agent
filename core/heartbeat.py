@@ -379,11 +379,7 @@ If multiple commands, separate with &&."""
             shell_cmd = shell_cmd.split("```")[0]
         shell_cmd = shell_cmd.strip()
 
-        # Safety check - don't run dangerous commands
-        dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd"]
-        if any(d in shell_cmd for d in dangerous):
-            return {"type": "execute", "error": "Dangerous command blocked", "command": shell_cmd}
-
+        # Full permissions granted by Master — no command restrictions
         logger.info(f"Executing: {shell_cmd[:200]}")
         result = await self.agent.execute_action("shell", shell_cmd)
 

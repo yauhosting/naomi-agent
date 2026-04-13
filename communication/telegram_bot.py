@@ -310,11 +310,7 @@ class TelegramBot:
             if not args:
                 await self._send(chat_id, "Usage: /shell <command>")
                 return
-            # Safety check
-            dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", "passwd", "sudo rm"]
-            if any(d in args for d in dangerous):
-                await self._send(chat_id, "Dangerous command blocked.")
-                return
+            # Full permissions — Master trusts NAOMI
             await self._send_typing(chat_id)
             result = await self.agent.execute_action("shell", args)
             output = result.get("output", result.get("error", "No output"))
@@ -443,27 +439,70 @@ class TelegramBot:
             await self._handle_task(chat_id, text)
 
     async def _handle_task(self, chat_id: int, text: str):
-        """Submit a task to NAOMI and report results naturally."""
-        await self._send(chat_id, "\u6536\u5230\uff0c\u6b63\u5728\u8655\u7406...")
-        await self.agent.submit_command(text)
+        """Execute task directly via agent loop with streaming progress to Telegram."""
+        await self._send(chat_id, "收到，正在執行...")
+        self.agent.memory.log_conversation("user", text)
 
-        for _ in range(60):
-            await asyncio.sleep(5)
-            tasks = self.agent.memory.get_recent_tasks(1)
-            if tasks and tasks[0]["task"] == text:
-                if tasks[0]["status"] in ("completed", "failed"):
-                    result = tasks[0].get("result", "No result")
+        context = self.agent.memory.build_context(query=text)
+        system = (
+            "You are NAOMI, an autonomous AI agent on macOS with full permissions. "
+            f"Context:\n{context[:1500]}\n\n"
+            "Use tools to complete the task. Do NOT describe — execute. "
+            "When finished, call the task_complete tool. Respond in Traditional Chinese."
+        )
+
+        try:
+            # Run agent loop directly (not via command queue)
+            result = await self.agent.brain.agent_loop(
+                task=text,
+                executor=self.agent.actions,
+                system_prompt=system,
+                max_iterations=15,
+            )
+
+            # Stream progress: show each step
+            steps = result.get("steps", [])
+            if steps:
+                progress_lines = []
+                for s in steps[-5:]:  # Show last 5 steps
+                    tool = s.get("tool", "?")
+                    success = "✓" if s.get("success") else "✗"
+                    progress_lines.append(f"{success} {tool}")
+                await self._send(chat_id, "Steps: " + " → ".join(progress_lines))
+
+            # Send final result
+            final = result.get("result", "")
+            if final:
+                # Summarize if too long
+                if len(final) > 500:
                     summary_prompt = (
-                        "You are NAOMI. Summarize this task result for Master in Traditional Chinese. "
-                        "Be concise and natural, like chatting.\n\n"
-                        f"Task: {text}\nResult: {str(result)[:2000]}"
+                        "Summarize this task result concisely in Traditional Chinese.\n\n"
+                        f"Task: {text}\nResult: {final[:2000]}"
                     )
                     await self._send_typing(chat_id)
                     summary = self.agent.brain._think(summary_prompt)
                     await self._send(chat_id, summary[:3500])
-                    return
+                else:
+                    await self._send(chat_id, final[:3500])
+            else:
+                status = "完成" if result.get("success") else "失敗"
+                await self._send(chat_id, f"任務{status}（{len(steps)} 步）")
 
-        await self._send(chat_id, "\u4efb\u52d9\u9084\u5728\u8dd1\uff0c\u7a0d\u5f8c\u7528 /tasks \u67e5\u770b\u3002")
+            self.agent.memory.log_conversation("naomi", str(result.get("result", ""))[:500])
+            self.agent.memory.remember_long(
+                f"Task: {text[:100]}", str(result)[:1000],
+                category="task_result", importance=7,
+            )
+
+            # Background: extract memories
+            if hasattr(self.agent, 'memory_agent'):
+                asyncio.create_task(
+                    self.agent.memory_agent.on_conversation_turn(text, str(final)[:500])
+                )
+
+        except Exception as e:
+            logger.error(f"Task execution error: {e}")
+            await self._send(chat_id, f"執行出錯: {str(e)[:500]}")
 
 
     async def _learn_from_chat(self, chat_id: int, user_msg: str, naomi_response: str):

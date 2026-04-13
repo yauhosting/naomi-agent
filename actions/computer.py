@@ -128,20 +128,49 @@ class ComputerControl:
         if not os.path.exists(screenshot_path):
             return f"[Vision failed: screenshot not found at {screenshot_path}]"
 
-        # Method 1: Claude proxy API with vision (if available)
-        if self.brain:
-            result = self._vision_via_proxy(prompt, screenshot_path)
+        # Read and encode image once
+        with open(screenshot_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # Resize if too large
+        if len(img_b64) > 1_400_000:
+            resized = screenshot_path.replace(".png", "_sm.png")
+            _run_shell(f"sips -Z 1280 '{screenshot_path}' --out '{resized}'")
+            if os.path.exists(resized):
+                with open(resized, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                try:
+                    os.unlink(resized)
+                except OSError:
+                    pass
+
+        # Method 1: Brain's Anthropic API (if API key available)
+        if self.brain and self.brain._anthropic_key:
+            result = self.brain.vision_analyze(prompt, screenshot_path)
+            if result and not result.startswith("[Vision"):
+                return result
+
+        # Method 2: Claude proxy with vision (works on Mac Mini)
+        result = self._vision_via_proxy(prompt, img_b64)
+        if result:
+            return result
+
+        # Method 3: MiniMax M2.7 vision
+        if self.brain and self.brain._minimax_key:
+            result = self._vision_via_minimax(prompt, img_b64)
             if result:
                 return result
 
-            # Method 2: Claude CLI — encode image as base64 and include in prompt
-            result = self._vision_via_cli(prompt, screenshot_path)
+        # Method 4: Anthropic API direct (if key exists)
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            result = self._vision_via_anthropic_api(prompt, img_b64, api_key)
             if result:
                 return result
 
-        return "[Vision offline: no brain available for image analysis]"
+        return "[Vision offline: no vision backend available. Need: Claude proxy (port 18790), MiniMax key, or Anthropic API key]"
 
-    def _vision_via_proxy(self, prompt: str, image_path: str) -> Optional[str]:
+    def _vision_via_proxy(self, prompt: str, img_b64: str) -> Optional[str]:
         """Use Claude proxy (OpenAI-compatible) with vision."""
         try:
             import httpx
@@ -149,10 +178,6 @@ class ComputerControl:
             return None
 
         proxy_url = "http://127.0.0.1:18790/v1/chat/completions"
-
-        # Read and encode image
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         messages = [{
             "role": "user",
@@ -176,38 +201,6 @@ class ComputerControl:
                 return data["choices"][0]["message"]["content"]
         except Exception as e:
             logger.debug(f"Vision via proxy failed: {e}")
-        return None
-
-    def _vision_via_cli(self, prompt: str, image_path: str) -> Optional[str]:
-        """Use Claude CLI — read image and describe via piped prompt."""
-        # Claude CLI doesn't have --image flag, but we can describe the file
-        # and use the Read tool capability indirectly.
-        # Best approach: encode as base64 and include in the prompt text
-        try:
-            with open(image_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-            # Truncate base64 if too large (keep under ~100KB for CLI)
-            if len(img_b64) > 150000:
-                # Resize image first using sips (macOS built-in)
-                resized_path = image_path.replace(".png", "_small.png")
-                _run_shell(f"sips -Z 1024 '{image_path}' --out '{resized_path}'")
-                if os.path.exists(resized_path):
-                    with open(resized_path, "rb") as f:
-                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-                    os.unlink(resized_path)
-
-            # Use Anthropic API directly (most reliable for vision)
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if api_key:
-                return self._vision_via_anthropic_api(prompt, img_b64, api_key)
-
-            # Fallback: use brain's MiniMax (if it supports vision)
-            if self.brain and self.brain._api_key:
-                return self._vision_via_minimax(prompt, img_b64)
-
-        except Exception as e:
-            logger.error(f"Vision via CLI failed: {e}")
         return None
 
     def _vision_via_anthropic_api(self, prompt: str, img_b64: str, api_key: str) -> Optional[str]:

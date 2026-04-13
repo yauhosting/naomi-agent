@@ -32,6 +32,7 @@ from core.personality import NAOMI_IDENTITY, SYSTEM_PROMPT
 from core.evolution import SelfEvolution, AgentCouncil
 from core.compaction import CompactionEngine
 from core.memory_agent import MemoryExtractionAgent
+from core.discovery import CapabilityDiscovery
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -91,12 +92,13 @@ class NAOMIAgent:
             os.path.join(PROJECT_DIR, self.config.get("memory", {}).get("db_path", "data/naomi_memory.db"))
         )
         self.brain = Brain(self.config.get("brain", {}))
-        self.actions = ActionExecutor(self.memory, PROJECT_DIR)
+        self.actions = ActionExecutor(self.memory, PROJECT_DIR, brain=self.brain)
         self.tool_manager = ToolManager(self.memory, self.actions)
         self.evolution = SelfEvolution(self.brain, self.memory, PROJECT_DIR)
         self.council = AgentCouncil(self.brain)
         self.compaction = CompactionEngine(self.memory, self.brain)
         self.memory_agent = MemoryExtractionAgent(self.brain, self.memory)
+        self.discovery = CapabilityDiscovery(self.brain, self.memory, self.actions, PROJECT_DIR)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

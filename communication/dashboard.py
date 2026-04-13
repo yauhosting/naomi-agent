@@ -73,6 +73,22 @@ def create_dashboard(agent) -> FastAPI:
         await agent.submit_command(command)
         return {"status": "queued", "command": command}
 
+    @app.get("/api/model")
+    async def get_model():
+        return {
+            "current": agent.brain.get_model(),
+            "available": agent.brain.list_models(),
+        }
+
+    @app.post("/api/model")
+    async def set_model(request: Request):
+        data = await request.json()
+        model_name = data.get("model", "")
+        if not model_name:
+            return JSONResponse({"error": "No model specified"}, status_code=400)
+        result = agent.brain.set_model(model_name)
+        return result
+
     @app.post("/api/council")
     async def council_debate(request: Request):
         data = await request.json()

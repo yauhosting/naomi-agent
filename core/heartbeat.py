@@ -1,9 +1,11 @@
 """
-NAOMI Agent - Heartbeat (Main Loop) v2
+NAOMI Agent - Heartbeat (Main Loop) v3
 The never-stopping life cycle of NAOMI.
-Sense -> Think -> Act -> Remember -> Repeat
+Sense -> Think -> Act -> Verify -> Remember -> Repeat
 
-v2: Smart task routing - brain classifies tasks before execution
+v3: Anti-hallucination — every action task MUST produce verifiable evidence.
+    Brain is never trusted to self-report completion.
+    Result validation enforces real execution vs. narrative fabrication.
 """
 import asyncio
 import time
@@ -23,6 +25,12 @@ AVAILABLE_ACTIONS = {
     "git": "Execute a git command",
     "pip_install": "Install a Python package",
     "web_search": "Search the web via DuckDuckGo",
+    "screenshot": "Take a screenshot of the screen",
+    "click": "Click at x,y coordinates",
+    "type_text": "Type text via keyboard",
+    "key_press": "Press a key or key combo",
+    "open_app": "Open an application",
+    "look_and_act": "Vision-action loop: screenshot → analyze → act",
 }
 
 
@@ -104,7 +112,7 @@ class Heartbeat:
         return result
 
     async def _execute_command(self, command: str):
-        """Smart command execution with task classification."""
+        """Smart command execution with anti-hallucination verification."""
         task_id = self.agent.memory.add_task(command)
         self.agent.memory.log_conversation("user", command)
 
@@ -116,29 +124,44 @@ class Heartbeat:
             logger.info(f"Task classified as: {task_type}")
 
             if task_type == "think":
-                # Pure thinking task - just let the brain answer
                 result = await self._handle_think_task(command, context)
             elif task_type == "search":
-                # Web search task
                 result = await self._handle_search_task(command, context)
             elif task_type == "code":
-                # Code generation + execution
                 result = await self._handle_code_task(command, context)
             elif task_type == "execute":
-                # Shell command execution
                 result = await self._handle_execute_task(command, context)
             elif task_type == "project":
-                # Multi-step project
                 result = await self._handle_project_task(command, context)
+            elif task_type == "computer":
+                result = await self._handle_computer_task(command, context)
+            elif task_type == "action":
+                result = await self._handle_action_task(command, context)
             else:
-                result = await self._handle_think_task(command, context)
+                result = await self._handle_action_task(command, context)
 
-            self.agent.memory.complete_task(task_id, str(result)[:2000])
-            self.agent.memory.log_conversation("naomi", str(result)[:1000])
-            self.agent.memory.remember_long(
-                f"Task: {command[:100]}", str(result)[:1000],
-                category="task_result", importance=7
-            )
+            # Step 2: Validate result — anti-hallucination check
+            validated = self._validate_result(task_type, result)
+
+            if validated["honest"]:
+                self.agent.memory.complete_task(task_id, str(result)[:2000])
+                self.agent.memory.log_conversation("naomi", str(result)[:1000])
+                self.agent.memory.remember_long(
+                    f"Task: {command[:100]}", str(result)[:1000],
+                    category="task_result", importance=7
+                )
+            else:
+                # Result is suspicious — mark as failed, not completed
+                logger.warning(f"Result validation FAILED: {validated['reason']}")
+                self.agent.memory.complete_task(
+                    task_id,
+                    f"[UNVERIFIED] {validated['reason']}\nRaw: {str(result)[:1500]}",
+                    status="failed"
+                )
+                self.agent.memory.log_conversation(
+                    "naomi",
+                    f"[UNVERIFIED — no real action taken] {str(result)[:500]}"
+                )
 
         except Exception as e:
             error_msg = f"Failed: {e}\n{traceback.format_exc()}"
@@ -146,8 +169,28 @@ class Heartbeat:
             self.agent.memory.log_conversation("naomi", f"Failed: {command}\nError: {e}")
             logger.error(error_msg)
 
+            # Auto-resolve: discover and install missing capabilities, then retry once
+            if hasattr(self.agent, 'discovery'):
+                try:
+                    resolve = await self.agent.discovery.auto_resolve(command, str(e))
+                    if resolve.get("resolved", 0) > 0 and resolve.get("can_retry"):
+                        logger.info(f"Auto-resolved {resolve['resolved']} capabilities, retrying task...")
+                        self.agent.memory.remember_short(
+                            f"Auto-installed {resolve['resolved']} capabilities for: {command[:80]}",
+                            category="discovery",
+                        )
+                        # Retry the task once
+                        retry_id = self.agent.memory.add_task(f"[Retry] {command}")
+                        try:
+                            retry_result = await self._handle_think_task(command, self.agent.memory.build_context())
+                            self.agent.memory.complete_task(retry_id, str(retry_result)[:2000])
+                        except Exception as retry_e:
+                            self.agent.memory.complete_task(retry_id, str(retry_e)[:2000], status="failed")
+                except Exception as disc_e:
+                    logger.warning(f"Discovery auto-resolve error: {disc_e}")
+
     def _classify_task(self, command: str) -> str:
-        """Classify task type based on keywords."""
+        """Classify task: does this need REAL actions or is it a pure question?"""
         cmd_lower = command.lower()
 
         # Search tasks
@@ -173,15 +216,63 @@ class Heartbeat:
         if any(k in cmd_lower for k in project_keywords):
             return "project"
 
-        # Default: think
+        # Computer control tasks (GUI, browser, screen)
+        computer_keywords = [
+            "click", "screenshot", "screen", "browser", "safari", "chrome",
+            "window", "scroll", "type in", "type into",
+            "打開瀏覽器", "點擊", "截圖", "螢幕", "視窗", "滾動", "輸入",
+            "open safari", "open chrome", "open browser", "open app",
+            "go to website", "navigate to", "visit",
+        ]
+        if any(k in cmd_lower for k in computer_keywords):
+            return "computer"
+
+        # Action-required tasks — anything that implies doing something real
+        action_keywords = [
+            "check", "verify", "look at", "download", "upload", "send", "post",
+            "save", "write", "read", "open", "close", "start", "stop", "monitor",
+            "test", "debug", "fix", "modify", "change", "move", "copy",
+            "幫我", "幫忙", "做", "改", "查", "看看", "檢查", "確認", "下載",
+            "上傳", "寄", "發", "存", "寫", "讀", "打開", "關閉", "啟動",
+            "測試", "修", "修改", "移動", "複製", "監控",
+        ]
+        if any(k in cmd_lower for k in action_keywords):
+            return "action"  # New type: needs real execution, not just brain text
+
+        # Default: think (pure question / conversation)
         return "think"
 
     async def _handle_think_task(self, command: str, context: str) -> str:
-        """Let the brain think and return the answer directly."""
-        logger.info("Handling as THINK task")
+        """Pure Q&A — brain answers a question. No action taken."""
+        logger.info("Handling as THINK task (pure Q&A, no action)")
         response = self.agent.brain.think(command, context)
         logger.info(f"Brain response: {response[:200]}")
         return response
+
+    async def _handle_action_task(self, command: str, context: str) -> dict:
+        """
+        Action task — uses Anthropic native tool_use agent loop.
+        Claude decides which tools to call, executor runs them, results fed back.
+        Anti-hallucination: every step is a real tool execution with real output.
+        """
+        logger.info("Handling as ACTION task (native tool_use agent loop)")
+
+        system = (
+            "You are NAOMI, an autonomous AI agent on macOS. "
+            f"Context:\n{context[:1500]}\n\n"
+            "Use tools to complete the task. Do NOT describe — execute. "
+            "When finished, call the task_complete tool with a summary."
+        )
+
+        result = await self.agent.brain.agent_loop(
+            task=command,
+            executor=self.agent.actions,
+            system_prompt=system,
+            max_iterations=15,
+        )
+
+        result["type"] = "action"
+        return result
 
     async def _handle_search_task(self, command: str, context: str) -> dict:
         """Perform web search and summarize results."""
@@ -303,68 +394,134 @@ If multiple commands, separate with &&."""
         }
 
     async def _handle_project_task(self, command: str, context: str) -> dict:
-        """Handle multi-step project tasks."""
-        logger.info("Handling as PROJECT task")
+        """Handle multi-step project tasks via agent loop."""
+        logger.info("Handling as PROJECT task (agent loop)")
 
-        # Use left brain to create a concrete plan with real actions
-        plan_prompt = f"""Task: {command}
+        system = (
+            "You are NAOMI, an autonomous AI agent on macOS. "
+            f"Context:\n{context[:1500]}\n\n"
+            "This is a multi-step project. Break it down and execute step by step. "
+            "Use tools to do real work. Call task_complete when finished."
+        )
 
-Create an actionable plan. For each step, specify:
-- action_type: one of [shell, python, web_search, file_write, pip_install, git]
-- command: the exact command or code to execute
+        result = await self.agent.brain.agent_loop(
+            task=command,
+            executor=self.agent.actions,
+            system_prompt=system,
+            max_iterations=15,
+        )
 
-Respond in JSON:
-{{
-  "understanding": "...",
-  "steps": [
-    {{"step": 1, "description": "...", "action_type": "shell", "command": "..."}}
-  ]
-}}"""
+        result["type"] = "project"
+        return result
 
-        plan_response = self.agent.brain._think(plan_prompt)
+    async def _handle_computer_task(self, command: str, context: str) -> dict:
+        """Handle GUI/screen control tasks via agent loop with screenshot tools."""
+        logger.info("Handling as COMPUTER task (agent loop with GUI tools)")
 
-        # Parse plan
-        try:
-            if "```json" in plan_response:
-                plan_response = plan_response.split("```json")[1].split("```")[0]
-            elif "```" in plan_response:
-                plan_response = plan_response.split("```")[1].split("```")[0]
-            plan = json.loads(plan_response.strip())
-        except (json.JSONDecodeError, IndexError):
-            # Fallback: treat as think task
-            return await self._handle_think_task(command, context)
+        system = (
+            "You are NAOMI, controlling a macOS computer. "
+            "Use screenshot, click, type_text, key_press, open_app tools to interact with the GUI. "
+            "Workflow: screenshot first → analyze what you see → click/type → screenshot to verify. "
+            "When the task is done, call task_complete."
+        )
 
-        # Execute each step
-        results = []
-        for step in plan.get("steps", [])[:10]:  # Max 10 steps
-            action_type = step.get("action_type", "shell")
-            cmd = step.get("command", "")
-            desc = step.get("description", "")
+        result = await self.agent.brain.agent_loop(
+            task=command,
+            executor=self.agent.actions,
+            system_prompt=system,
+            max_iterations=15,
+        )
 
-            if action_type not in AVAILABLE_ACTIONS:
-                logger.warning(f"Unknown action_type: {action_type}, skipping")
-                results.append({"step": step.get("step"), "skipped": True, "reason": f"Unknown action: {action_type}"})
-                continue
+        result["type"] = "computer"
+        return result
 
-            logger.info(f"Project step {step.get('step', '?')}: {desc[:100]}")
-            result = await self.agent.execute_action(action_type, cmd)
-            results.append({"step": step.get("step"), "description": desc, "result": result})
+    def _validate_result(self, task_type: str, result) -> dict:
+        """
+        Anti-hallucination: verify that tasks which require real actions
+        actually produced real execution evidence, not just brain-generated text.
+        """
+        # Pure think tasks are always honest (they're just Q&A)
+        if task_type == "think":
+            return {"honest": True, "reason": "Q&A task, no action required"}
 
-            # If step failed, ask brain to fix
-            if result.get("error") and not result.get("success"):
-                logger.warning(f"Step failed: {result['error'][:200]}")
-                fix = self.agent.brain.debug(result["error"], f"Step: {desc}\nCommand: {cmd}")
-                # Try to extract a fix command
-                if fix and not fix.startswith("[Brain"):
-                    fix_result = await self.agent.execute_action("shell", fix.strip()[:500])
-                    results.append({"step": f"{step.get('step')}_fix", "result": fix_result})
+        # String results from action-type tasks are suspicious
+        # (brain just generated text without executing anything)
+        if isinstance(result, str):
+            # Check for hallucination signals in text
+            hallucination_signals = [
+                "I would", "I will", "I can", "let me", "here's what",
+                "I'll", "I'd suggest", "you can", "you should",
+                "我會", "我可以", "讓我", "建議你", "你可以",
+            ]
+            result_lower = result.lower()
+            if any(sig in result_lower for sig in hallucination_signals):
+                return {
+                    "honest": False,
+                    "reason": "Brain produced narrative text instead of executing real actions",
+                }
+            # Short string responses from action tasks are suspicious
+            if task_type in ("action", "execute", "code", "project") and len(result) < 200:
+                return {
+                    "honest": False,
+                    "reason": "Action task returned suspiciously short text response",
+                }
 
-        return {
-            "type": "project",
-            "understanding": plan.get("understanding", ""),
-            "total_steps": len(plan.get("steps", [])),
-            "results": results,
-        }
+        # Dict results: check for real execution evidence
+        if isinstance(result, dict):
+            rtype = result.get("type", "")
+
+            # Action tasks must have executed steps
+            if rtype == "action":
+                executed = result.get("actions_executed", 0)
+                if executed == 0:
+                    return {"honest": False, "reason": "Action plan had 0 executed steps"}
+                return {"honest": True, "reason": f"Executed {executed} real actions"}
+
+            if rtype == "action_failed":
+                return {"honest": True, "reason": "Honestly reported action failure"}
+
+            if rtype == "think_downgrade":
+                return {"honest": True, "reason": "Brain correctly identified as Q&A"}
+
+            # Search must have real results or honest fallback note
+            if rtype == "search":
+                if result.get("results_count", 0) > 0:
+                    return {"honest": True, "reason": "Search returned real results"}
+                return {"honest": False, "reason": "Search claimed success but no results"}
+
+            if rtype == "search_fallback":
+                return {"honest": True, "reason": "Honestly reported search failure, used knowledge"}
+
+            # Code tasks must have execution output
+            if rtype == "code":
+                exec_data = result.get("execution", {})
+                if isinstance(exec_data, dict) and "output" in exec_data:
+                    return {"honest": True, "reason": "Code was executed with real output"}
+                return {"honest": False, "reason": "Code task has no execution evidence"}
+
+            # Execute tasks must have shell output
+            if rtype == "execute":
+                exec_data = result.get("result", {})
+                if isinstance(exec_data, dict) and ("output" in exec_data or "returncode" in exec_data):
+                    return {"honest": True, "reason": "Shell command was really executed"}
+                return {"honest": False, "reason": "Execute task has no shell output"}
+
+            # Project tasks must have step results
+            if rtype == "project":
+                step_results = result.get("results", [])
+                if step_results:
+                    return {"honest": True, "reason": f"Project executed {len(step_results)} steps"}
+                return {"honest": False, "reason": "Project plan had no executed steps"}
+
+            # Computer tasks must have look_and_act steps
+            if rtype == "computer":
+                steps = result.get("steps_taken", 0)
+                if steps > 0:
+                    return {"honest": True, "reason": f"Computer control executed {steps} vision-action steps"}
+                return {"honest": False, "reason": "Computer task had no executed steps"}
+
+        # Default: pass through (benefit of the doubt for unknown types)
+        return {"honest": True, "reason": "Unclassified result type"}
 
     async def _handle_error(self, error: str):
         logger.info(f"Auto-handling error: {error[:200]}")
@@ -391,6 +548,17 @@ Respond in JSON:
         if reflection.get("self_improvements"):
             for imp in reflection["self_improvements"][:1]:
                 self.agent.memory.remember_short(f"Self-improvement: {imp}", category="improvement")
+
+        # Idle capability discovery — check if recent failures need new tools
+        if hasattr(self.agent, 'discovery'):
+            try:
+                disc_result = self.agent.discovery.idle_discover()
+                if disc_result.get("action") == "installed":
+                    logger.info(f"Idle discovery installed: {disc_result.get('details', [])}")
+                elif disc_result.get("action") == "suggested":
+                    logger.info(f"Idle discovery suggested: {disc_result.get('suggestions', {})}")
+            except Exception as e:
+                logger.warning(f"Idle discovery error: {e}")
 
     async def _self_check(self):
         logger.info(f"Self-check: beat #{self.beat_count}, state={self.state}")

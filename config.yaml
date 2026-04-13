@@ -1,14 +1,15 @@
 # NAOMI Agent Configuration
 agent:
   name: "NAOMI"
-  version: "0.1.0"
+  version: "0.4.0"
   description: "Autonomous AI Agent - Digital Life Form"
 
 brain:
-  # Primary: Claude CLI (subscription-based, no extra cost)
+  # Primary: Claude CLI via proxy (OpenClaw style) — uses Max subscription
   primary:
-    type: "claude_cli"
-    model: "sonnet"  # claude CLI default
+    type: "claude_proxy"
+    model: "claude-sonnet-4-6"     # Sonnet for daily tasks (fast + capable)
+    proxy_url: "http://127.0.0.1:18790/v1/chat/completions"
     timeout: 120
   # Fallback: MiniMax 2.7 API
   fallback:
@@ -36,7 +37,7 @@ senses:
 dashboard:
   host: "0.0.0.0"
   port: 18802
-  
+
 git:
   auto_commit: true
   auto_push: true
@@ -47,6 +48,11 @@ logging:
   level: "INFO"
   file: "data/naomi.log"
   max_size: "10MB"
+
+computer:
+  screenshot_dir: "/tmp/naomi_screenshots"
+  max_steps: 15            # max vision-action loop steps
+  cleanup_keep: 20         # keep latest N screenshots
 
 telegram:
   enabled: true

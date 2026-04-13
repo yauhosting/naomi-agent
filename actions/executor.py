@@ -15,9 +15,11 @@ logger = logging.getLogger("naomi.actions")
 class ActionExecutor:
     """Unified action execution system."""
 
-    def __init__(self, memory, project_dir: str):
+    def __init__(self, memory, project_dir: str, brain=None):
         self.memory = memory
         self.project_dir = project_dir
+        self._computer = None  # Lazy init
+
         self.actions = {
             "shell": self.execute_shell,
             "python": self.execute_python,
@@ -27,7 +29,47 @@ class ActionExecutor:
             "git": self.git_operation,
             "pip_install": self.pip_install,
             "web_search": self.web_search,
+            "screenshot": self._do_screenshot,
+            "click": self._do_click,
+            "type_text": self._do_type,
+            "key_press": self._do_key,
+            "open_app": self._do_open_app,
+            "look_and_act": self._do_look_and_act,
         }
+        self._brain = brain
+
+    def set_brain(self, brain):
+        """Set brain reference (called after brain is initialized)."""
+        self._brain = brain
+
+    def _get_computer(self):
+        """Lazy-init ComputerControl."""
+        if self._computer is None:
+            from actions.computer import ComputerControl
+            self._computer = ComputerControl(brain=self._brain)
+        return self._computer
+
+    # Computer control action wrappers
+    def _do_screenshot(self, params: str) -> Dict[str, Any]:
+        return self._get_computer().screenshot(params if params else None)
+
+    def _do_click(self, params: str) -> Dict[str, Any]:
+        parts = params.replace(",", " ").split()
+        if len(parts) < 2:
+            return {"success": False, "error": "Format: x y"}
+        return self._get_computer().click(int(parts[0]), int(parts[1]))
+
+    def _do_type(self, params: str) -> Dict[str, Any]:
+        return self._get_computer().type_text(params)
+
+    def _do_key(self, params: str) -> Dict[str, Any]:
+        return self._get_computer().key(params)
+
+    def _do_open_app(self, params: str) -> Dict[str, Any]:
+        return self._get_computer().open_app(params)
+
+    def _do_look_and_act(self, params: str) -> Dict[str, Any]:
+        return self._get_computer().look_and_act(params)
 
     async def execute(self, action_type: str, params: str) -> Dict[str, Any]:
         """Execute an action by type."""
@@ -130,7 +172,11 @@ class ActionExecutor:
         """Search the web using DuckDuckGo (ddgs package)."""
         try:
             from ddgs import DDGS
-            results = DDGS().text(query, max_results=5)
+            # DDGS().text() returns a generator — must convert to list
+            results = list(DDGS().text(query, max_results=5))
+            if not results:
+                return {"success": False, "results": [], "query": query,
+                        "error": "Search returned no results"}
             return {
                 "success": True,
                 "results": results,
@@ -140,7 +186,7 @@ class ActionExecutor:
             self.pip_install("ddgs")
             return self.web_search(query)
         except Exception as e:
-            return {"error": str(e), "success": False}
+            return {"error": str(e), "success": False, "results": []}
 
 
 class ToolManager:

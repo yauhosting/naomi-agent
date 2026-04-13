@@ -11,3 +11,4 @@ psutil>=5.9.0
 watchdog>=3.0.0
 httpx>=0.25.0
 python-multipart>=0.0.6
+anthropic>=0.90.0

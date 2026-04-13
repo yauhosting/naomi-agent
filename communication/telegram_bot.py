@@ -95,6 +95,8 @@ class TelegramBot:
                 "NAOMI Agent - Telegram Control\n\n"
                 "Commands:\n"
                 "/status - Agent status\n"
+                "/model - View/switch brain model\n"
+                "/discover - Discover/install capabilities\n"
                 "/tasks - Recent tasks\n"
                 "/memory - Memory stats\n"
                 "/skills - Learned skills\n"
@@ -103,6 +105,11 @@ class TelegramBot:
                 "/council <topic> - Multi-agent debate\n"
                 "/evolve - Trigger self-evolution\n"
                 "/shell <cmd> - Execute shell command\n"
+                "/screen - Take screenshot\n"
+                "/click x y - Click at coordinates\n"
+                "/type <text> - Type text\n"
+                "/key <key> - Press key (return, cmd+c...)\n"
+                "/app [name] - Open app / list windows\n"
                 "/log - Recent activity log\n\n"
                 "Or just type anything to give NAOMI a task."
             )
@@ -123,6 +130,107 @@ class TelegramBot:
                 f"Heartbeats: {status['beats']}\n"
                 f"Tools: {status['tools']} available"
             )
+
+        elif cmd == "/model":
+            if not args:
+                # Show current model and list
+                current = self.agent.brain.get_model()
+                models = self.agent.brain.list_models()
+                lines = []
+                for m in models:
+                    marker = " <<" if m["active"] else ""
+                    lines.append(f"  {m['name']} — {m['description']}{marker}")
+                await self._send(chat_id,
+                    f"Current model: {current['name']}\n"
+                    f"Backend: {current['backend']}\n"
+                    f"Model ID: {current['model_id']}\n\n"
+                    f"Available models:\n" + "\n".join(lines) + "\n\n"
+                    f"Usage: /model <name>\n"
+                    f"Example: /model claude-cli"
+                )
+            else:
+                result = self.agent.brain.set_model(args)
+                if result.get("success"):
+                    await self._send(chat_id,
+                        f"Model switched!\n"
+                        f"{result['previous']} -> {result['model']}\n"
+                        f"{result['description']}"
+                    )
+                else:
+                    available = result.get("available", [])
+                    await self._send(chat_id,
+                        f"Failed: {result.get('error', 'Unknown error')}\n\n"
+                        f"Available: {', '.join(available)}" if available else
+                        f"Failed: {result.get('error', 'Unknown error')}"
+                    )
+
+        elif cmd == "/discover":
+            if not args:
+                # Show discovery status
+                if hasattr(self.agent, 'discovery'):
+                    status = self.agent.discovery.get_status()
+                    mcp_list = ", ".join(status["installed_mcp"]) if status["installed_mcp"] else "none"
+                    known_list = ", ".join(status["known_mcp"])
+                    cat_list = ", ".join(status["available_categories"])
+                    await self._send(chat_id,
+                        f"Capability Discovery\n\n"
+                        f"Installed MCP: {mcp_list}\n"
+                        f"Known MCP: {known_list}\n"
+                        f"Package categories: {cat_list}\n"
+                        f"Learned skills: {status['learned_skills']}\n\n"
+                        f"Usage:\n"
+                        f"/discover install <mcp-name> — Install MCP server\n"
+                        f"/discover pkg <package> — Install Python package\n"
+                        f"/discover scan — Scan for missing capabilities\n"
+                        f"/discover tool <name> — Install system tool"
+                    )
+                else:
+                    await self._send(chat_id, "Discovery engine not initialized.")
+            else:
+                parts = args.split(None, 1)
+                sub_cmd = parts[0].lower()
+                sub_args = parts[1] if len(parts) > 1 else ""
+
+                if sub_cmd == "install" and sub_args:
+                    await self._send(chat_id, f"Installing MCP: {sub_args}...")
+                    await self._send_typing(chat_id)
+                    result = self.agent.discovery.install_mcp(sub_args)
+                    if result.get("success"):
+                        await self._send(chat_id, f"MCP '{sub_args}' installed!\n{result.get('description', '')}")
+                    else:
+                        await self._send(chat_id, f"Failed: {result.get('error', 'Unknown')}")
+
+                elif sub_cmd == "pkg" and sub_args:
+                    await self._send(chat_id, f"Installing package: {sub_args}...")
+                    result = self.agent.discovery.install_package(sub_args)
+                    status_text = "installed" if result.get("success") else f"failed: {result.get('error','')[:200]}"
+                    await self._send(chat_id, f"Package {sub_args}: {status_text}")
+
+                elif sub_cmd == "tool" and sub_args:
+                    await self._send(chat_id, f"Installing tool: {sub_args}...")
+                    result = self.agent.discovery.install_tool(sub_args)
+                    status_text = "installed" if result.get("success") else f"failed: {result.get('error','')[:200]}"
+                    await self._send(chat_id, f"Tool {sub_args}: {status_text}")
+
+                elif sub_cmd == "scan":
+                    await self._send(chat_id, "Scanning for missing capabilities...")
+                    await self._send_typing(chat_id)
+                    result = self.agent.discovery.idle_discover()
+                    action = result.get("action", "none")
+                    if action == "installed":
+                        details = result.get("details", [])
+                        await self._send(chat_id, f"Auto-installed {len(details)} capabilities!")
+                    elif action == "suggested":
+                        suggestions = result.get("suggestions", {})
+                        lines = []
+                        for k, v in suggestions.items():
+                            if v and k != "priority":
+                                lines.append(f"{k}: {', '.join(v) if isinstance(v, list) else v}")
+                        await self._send(chat_id, f"Suggestions ({suggestions.get('priority','?')}):\n" + "\n".join(lines))
+                    else:
+                        await self._send(chat_id, f"No new capabilities needed. ({result.get('reason', '')})")
+                else:
+                    await self._send(chat_id, "Usage: /discover [install|pkg|tool|scan] <name>")
 
         elif cmd == "/tasks":
             tasks = self.agent.memory.get_recent_tasks(5)
@@ -219,6 +327,59 @@ class TelegramBot:
                 return
             lines = [f"[{e['category']}] {e['content'][:80]}" for e in entries]
             await self._send(chat_id, "Recent Log:\n" + "\n".join(lines))
+
+        elif cmd == "/screen":
+            await self._send(chat_id, "Taking screenshot...")
+            computer = self.agent.actions._get_computer()
+            result = computer.screenshot()
+            if result.get("success"):
+                # Send screenshot as photo to Telegram
+                await self._send_photo(chat_id, result["path"])
+            else:
+                await self._send(chat_id, f"Screenshot failed: {result.get('error', '?')}")
+
+        elif cmd == "/click":
+            if not args:
+                await self._send(chat_id, "Usage: /click x y")
+                return
+            parts = args.replace(",", " ").split()
+            if len(parts) < 2:
+                await self._send(chat_id, "Usage: /click x y")
+                return
+            computer = self.agent.actions._get_computer()
+            result = computer.click(int(parts[0]), int(parts[1]))
+            await self._send(chat_id, f"Clicked ({parts[0]}, {parts[1]}): {'OK' if result.get('success') else result.get('error','failed')}")
+
+        elif cmd == "/type":
+            if not args:
+                await self._send(chat_id, "Usage: /type <text>")
+                return
+            computer = self.agent.actions._get_computer()
+            result = computer.type_text(args)
+            await self._send(chat_id, f"Typed: {'OK' if result.get('success') else result.get('error','failed')}")
+
+        elif cmd == "/key":
+            if not args:
+                await self._send(chat_id, "Usage: /key <key> (e.g. return, cmd+c, tab)")
+                return
+            computer = self.agent.actions._get_computer()
+            result = computer.key(args)
+            await self._send(chat_id, f"Key '{args}': {'OK' if result.get('success') else result.get('error','failed')}")
+
+        elif cmd == "/app":
+            if not args:
+                # List windows
+                computer = self.agent.actions._get_computer()
+                result = computer.get_windows()
+                if result.get("success"):
+                    windows = result.get("windows", [])
+                    await self._send(chat_id, f"Open windows ({len(windows)}):\n" + "\n".join(windows[:20]))
+                else:
+                    await self._send(chat_id, f"Failed: {result.get('error','?')}")
+            else:
+                computer = self.agent.actions._get_computer()
+                result = computer.open_app(args)
+                await self._send(chat_id, f"Opening {args}: {'OK' if result.get('success') else result.get('error','failed')}")
 
         else:
             await self._send(chat_id, f"Unknown command: {cmd}\nType /start for help.")
@@ -433,6 +594,41 @@ class TelegramBot:
                 )
             except Exception as e:
                 logger.error(f"Telegram send error: {e}")
+
+    async def _send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
+        """Send a photo to Telegram."""
+        try:
+            import aiofiles
+            async with aiofiles.open(photo_path, "rb") as f:
+                photo_data = await f.read()
+            files = {"photo": ("screenshot.png", photo_data, "image/png")}
+            data = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption[:1024]
+            # Use httpx for multipart upload
+            await self.client.post(
+                f"{self.base_url}/sendPhoto",
+                data=data,
+                files=files,
+                timeout=30,
+            )
+        except ImportError:
+            # Fallback without aiofiles
+            with open(photo_path, "rb") as f:
+                photo_data = f.read()
+            files = {"photo": ("screenshot.png", photo_data, "image/png")}
+            data = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption[:1024]
+            await self.client.post(
+                f"{self.base_url}/sendPhoto",
+                data=data,
+                files=files,
+                timeout=30,
+            )
+        except Exception as e:
+            logger.error(f"Telegram send photo error: {e}")
+            await self._send(chat_id, f"Screenshot saved at: {photo_path}\n(Failed to send photo: {e})")
 
     async def send_message(self, text: str):
         """Send a message to the master."""

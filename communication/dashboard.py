@@ -1,13 +1,16 @@
 """
 NAOMI Agent - Web Dashboard
 Real-time control panel with WebSocket for live updates.
+Token-based authentication for all API endpoints.
 """
 import json
 import time
 import asyncio
 import logging
+import secrets
+import os
 from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -16,15 +19,42 @@ logger = logging.getLogger("naomi.dashboard")
 # Store connected WebSocket clients
 connected_clients = set()
 
+# Dashboard auth token — auto-generated on first run, stored in data/
+TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "dashboard_token.txt")
+
+
+def _get_or_create_token() -> str:
+    """Get existing token or generate a new one."""
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, 'r') as f:
+            return f.read().strip()
+    token = secrets.token_urlsafe(32)
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, 'w') as f:
+        f.write(token)
+    logger.info(f"Dashboard token generated: {token[:8]}...")
+    return token
+
+
+DASHBOARD_TOKEN = _get_or_create_token()
+
 
 def create_dashboard(agent) -> FastAPI:
     app = FastAPI(title="NAOMI Agent Dashboard")
 
+    async def verify_token(request: Request):
+        """Verify dashboard token from header or query param."""
+        token = request.headers.get("X-Dashboard-Token") or request.query_params.get("token")
+        if token != DASHBOARD_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid or missing dashboard token")
+
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return DASHBOARD_HTML
+        # Dashboard HTML doesn't need auth (token is embedded in JS)
+        html = DASHBOARD_HTML.replace("%%TOKEN%%", DASHBOARD_TOKEN)
+        return html
 
-    @app.get("/api/status")
+    @app.get("/api/status", dependencies=[Depends(verify_token)])
     async def get_status():
         return {
             "name": "NAOMI",
@@ -43,11 +73,11 @@ def create_dashboard(agent) -> FastAPI:
             "timestamp": time.time(),
         }
 
-    @app.get("/api/tasks")
+    @app.get("/api/tasks", dependencies=[Depends(verify_token)])
     async def get_tasks():
         return {"tasks": agent.memory.get_recent_tasks(50)}
 
-    @app.get("/api/memory")
+    @app.get("/api/memory", dependencies=[Depends(verify_token)])
     async def get_memory():
         return {
             "short_term": agent.memory.recall_short(limit=20),
@@ -55,16 +85,16 @@ def create_dashboard(agent) -> FastAPI:
             "conversations": agent.memory.get_conversations(limit=30),
         }
 
-    @app.get("/api/skills")
+    @app.get("/api/skills", dependencies=[Depends(verify_token)])
     async def get_skills():
         skills = agent.memory.recall_skill()
         return {"skills": skills if isinstance(skills, list) else []}
 
-    @app.get("/api/conversations")
+    @app.get("/api/conversations", dependencies=[Depends(verify_token)])
     async def get_conversations():
         return {"conversations": agent.memory.get_conversations(50)}
 
-    @app.post("/api/command")
+    @app.post("/api/command", dependencies=[Depends(verify_token)])
     async def post_command(request: Request):
         data = await request.json()
         command = data.get("command", "")
@@ -73,14 +103,14 @@ def create_dashboard(agent) -> FastAPI:
         await agent.submit_command(command)
         return {"status": "queued", "command": command}
 
-    @app.get("/api/model")
+    @app.get("/api/model", dependencies=[Depends(verify_token)])
     async def get_model():
         return {
             "current": agent.brain.get_model(),
             "available": agent.brain.list_models(),
         }
 
-    @app.post("/api/model")
+    @app.post("/api/model", dependencies=[Depends(verify_token)])
     async def set_model(request: Request):
         data = await request.json()
         model_name = data.get("model", "")
@@ -89,7 +119,7 @@ def create_dashboard(agent) -> FastAPI:
         result = agent.brain.set_model(model_name)
         return result
 
-    @app.post("/api/council")
+    @app.post("/api/council", dependencies=[Depends(verify_token)])
     async def council_debate(request: Request):
         data = await request.json()
         topic = data.get("topic", "")
@@ -98,7 +128,7 @@ def create_dashboard(agent) -> FastAPI:
         result = agent.council.debate(topic)
         return result
 
-    @app.post("/api/evolve")
+    @app.post("/api/evolve", dependencies=[Depends(verify_token)])
     async def trigger_evolution(request: Request):
         result = agent.evolution.evolution_cycle()
         return result
@@ -269,6 +299,8 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', syste
 <script>
 const WS_URL = `ws://${location.host}/ws`;
 const API_URL = `http://${location.host}/api`;
+const TOKEN = '%%TOKEN%%';
+const AUTH_HEADERS = {'Content-Type': 'application/json', 'X-Dashboard-Token': TOKEN};
 let ws;
 
 function connectWebSocket() {
@@ -314,7 +346,7 @@ async function sendCommand() {
   addConversation('user', cmd);
 
   const resp = await fetch(API_URL + '/command', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST', headers: AUTH_HEADERS,
     body: JSON.stringify({command: cmd})
   });
   const data = await resp.json();
@@ -326,7 +358,7 @@ async function triggerCouncil() {
   if (!topic) return;
   addConversation('user', `[Council] ${topic}`);
   const resp = await fetch(API_URL + '/council', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST', headers: AUTH_HEADERS,
     body: JSON.stringify({topic})
   });
   const data = await resp.json();
@@ -336,7 +368,7 @@ async function triggerCouncil() {
 async function triggerEvolve() {
   if (!confirm('Trigger NAOMI self-evolution cycle?')) return;
   addConversation('system', 'Evolution cycle triggered...');
-  const resp = await fetch(API_URL + '/evolve', {method: 'POST'});
+  const resp = await fetch(API_URL + '/evolve', {method: 'POST', headers: AUTH_HEADERS});
   const data = await resp.json();
   addConversation('naomi', `Evolution complete: ${JSON.stringify(data).substring(0, 500)}`);
 }
@@ -352,9 +384,9 @@ function addConversation(role, msg) {
 async function refreshData() {
   try {
     const [status, tasks, memory] = await Promise.all([
-      fetch(API_URL + '/status').then(r => r.json()),
-      fetch(API_URL + '/tasks').then(r => r.json()),
-      fetch(API_URL + '/memory').then(r => r.json()),
+      fetch(API_URL + '/status', {headers: AUTH_HEADERS}).then(r => r.json()),
+      fetch(API_URL + '/tasks', {headers: AUTH_HEADERS}).then(r => r.json()),
+      fetch(API_URL + '/memory', {headers: AUTH_HEADERS}).then(r => r.json()),
     ]);
 
     document.getElementById('memoryCount').textContent =

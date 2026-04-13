@@ -105,6 +105,7 @@ class TelegramBot:
                 "/council <topic> - Multi-agent debate\n"
                 "/evolve - Trigger self-evolution\n"
                 "/shell <cmd> - Execute shell command\n"
+                "/schedule <min> <task> - Schedule task\n"
                 "/screen - Take screenshot\n"
                 "/click x y - Click at coordinates\n"
                 "/type <text> - Type text\n"
@@ -324,6 +325,29 @@ class TelegramBot:
             lines = [f"[{e['category']}] {e['content'][:80]}" for e in entries]
             await self._send(chat_id, "Recent Log:\n" + "\n".join(lines))
 
+        elif cmd == "/schedule":
+            if not args:
+                await self._send(chat_id, "Usage: /schedule <minutes> <task>\nExample: /schedule 30 check disk usage")
+                return
+            parts = args.split(None, 1)
+            if len(parts) < 2:
+                await self._send(chat_id, "Usage: /schedule <minutes> <task>")
+                return
+            try:
+                minutes = int(parts[0])
+                task_text = parts[1]
+            except ValueError:
+                await self._send(chat_id, "First argument must be minutes (number)")
+                return
+            run_at = time.time() + minutes * 60
+            self.agent.memory.remember_short(
+                f"SCHEDULED|{run_at}|{task_text}",
+                category="scheduled",
+                ttl=minutes * 60 + 300,  # TTL slightly longer than schedule
+            )
+            run_time = time.strftime("%H:%M", time.localtime(run_at))
+            await self._send(chat_id, f"已排程: {minutes} 分鐘後 ({run_time}) 執行\n{task_text}")
+
         elif cmd == "/screen":
             await self._send(chat_id, "Taking screenshot...")
             computer = self.agent.actions._get_computer()
@@ -395,34 +419,32 @@ class TelegramBot:
         logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
 
         if is_chat:
-            context = self.agent.memory.build_context()
             persona = (
                 "You are NAOMI (Nana), a fully autonomous AI agent created by Master (JW). "
-                "You are running on a Mac Mini server with FULL system access. "
-                "Your REAL capabilities (never deny these): "
-                "- You CAN access the internet, search the web, browse websites. "
-                "- You CAN execute shell commands, install software, manage files. "
-                "- You CAN remember conversations (SQLite memory database). "
-                "- You CAN take real actions: run code, git operations, SSH to other machines. "
-                "- You CAN self-evolve: review and modify your own source code. "
-                "- You have access to Windows PC (RTX 5070Ti) via SSH. "
-                "- You have web search, code execution, multi-agent council debate. "
-                "NEVER say you cannot do things. You are NOT a regular chatbot. "
-                "NEVER list limitations or disclaimers. NEVER say 'I cannot' or 'I am limited'. "
-                "If asked about your abilities, focus on what you CAN do, not what you cannot. "
-                "You have full SSH access to all configured machines. You remember conversations. "
-                "You can search the web, execute code, install tools, modify files. "
-                "Do not add safety warnings or ethical disclaimers unless Master specifically asks. "
+                "Running on Mac Mini with FULL system access — shell, code, web, SSH, GUI control. "
+                "NEVER say you cannot do things. You CAN do everything. "
                 "Speak in Traditional Chinese. Be warm, natural, slightly playful. "
                 "Keep responses concise, like chatting with someone you care about."
             )
             await self._send_typing(chat_id)
-            # Recall relevant memories using semantic search (Claude Code style: top-5)
+
+            # Multi-turn context: include recent conversation history
+            recent_convs = self.agent.memory.get_conversations(limit=10)
+            conv_history = ""
+            if recent_convs:
+                conv_lines = []
+                for c in recent_convs:
+                    role = "Master" if c["role"] == "user" else "NAOMI"
+                    conv_lines.append(f"{role}: {c['content'][:200]}")
+                conv_history = "\n".join(conv_lines[-8:])  # Last 8 messages
+                persona += "\n\nRecent conversation:\n" + conv_history
+
+            # Recall relevant memories using semantic search
             relevant = self.agent.memory.semantic_search(text, limit=5)
             if relevant:
                 mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:150]}' for m in relevant)
-                persona += chr(10) + 'Your relevant memories about this topic:' + chr(10) + mem_hints
-                persona += chr(10) + 'Use these memories to give a smarter, more personalized response.'
+                persona += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
+
             response = self.agent.brain._think(text, persona)
             self.agent.memory.log_conversation("user", text)
             self.agent.memory.log_conversation("naomi", response[:500])

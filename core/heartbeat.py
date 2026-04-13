@@ -90,6 +90,13 @@ class Heartbeat:
             await self._self_check()
             self.last_self_check = now
 
+        # Periodic cleanup (every 10 minutes)
+        if self.beat_count % 20 == 0:
+            self._periodic_cleanup()
+
+        # Check scheduled tasks
+        await self._check_scheduled_tasks()
+
         self.state = "active"
         await asyncio.sleep(self.interval)
 
@@ -519,6 +526,58 @@ If multiple commands, separate with &&."""
         # Default: pass through (benefit of the doubt for unknown types)
         return {"honest": True, "reason": "Unclassified result type"}
 
+    def _periodic_cleanup(self):
+        """Periodic maintenance: screenshot cleanup, memory consolidation."""
+        # Cleanup old screenshots
+        try:
+            computer = self.agent.actions._get_computer()
+            result = computer.cleanup_screenshots(keep_latest=20)
+            if result.get("deleted", 0) > 0:
+                logger.info(f"Cleaned up {result['deleted']} old screenshots")
+        except Exception as e:
+            logger.debug(f"Screenshot cleanup: {e}")
+
+        # Memory consolidation
+        try:
+            self.agent.memory.consolidate()
+        except Exception as e:
+            logger.debug(f"Memory consolidation: {e}")
+
+    async def _check_scheduled_tasks(self):
+        """Check and execute scheduled tasks from memory."""
+        try:
+            scheduled = self.agent.memory.recall_short(category="scheduled")
+            now = time.time()
+            for task in scheduled:
+                # Format: "SCHEDULED|<timestamp>|<command>"
+                content = task.get("content", "")
+                if not content.startswith("SCHEDULED|"):
+                    continue
+                parts = content.split("|", 2)
+                if len(parts) < 3:
+                    continue
+                run_at = float(parts[1])
+                command = parts[2]
+                if now >= run_at:
+                    logger.info(f"Executing scheduled task: {command[:80]}")
+                    # Remove from schedule
+                    self.agent.memory.conn.execute(
+                        "DELETE FROM short_term WHERE id=?", (task["id"],)
+                    )
+                    self.agent.memory.conn.commit()
+                    # Execute
+                    await self._execute_command(command)
+        except Exception as e:
+            logger.debug(f"Scheduled tasks check: {e}")
+
+    async def _notify_master(self, message: str):
+        """Send proactive notification to Master via Telegram."""
+        if hasattr(self.agent, 'telegram'):
+            try:
+                await self.agent.telegram.send_message(message)
+            except Exception as e:
+                logger.error(f"Failed to notify master: {e}")
+
     async def _handle_error(self, error: str):
         logger.info(f"Auto-handling error: {error[:200]}")
         context = self.agent.memory.build_context()
@@ -557,28 +616,35 @@ If multiple commands, separate with &&."""
                 logger.warning(f"Idle discovery error: {e}")
 
     async def _self_check(self):
-        logger.info(f"Self-check: beat #{self.beat_count}, state={self.state}")
+        uptime = time.time() - self.agent.start_time
+        logger.info(f"Self-check: beat #{self.beat_count}, uptime {uptime:.0f}s")
         self.agent.memory.remember_short(
-            f"Self-check OK: {self.beat_count} beats, uptime {time.time() - self.agent.start_time:.0f}s",
+            f"Self-check OK: {self.beat_count} beats, uptime {uptime:.0f}s",
             category="system"
         )
+
+        # Check for accumulated errors and alert Master
+        recent_errors = self.agent.memory.recall_short(category="error", limit=10)
+        if len(recent_errors) >= 5:
+            await self._notify_master(
+                f"⚠️ 系統警告：最近有 {len(recent_errors)} 個錯誤\n"
+                + "\n".join(f"- {e['content'][:60]}" for e in recent_errors[:3])
+            )
 
         # Trigger evolution cycle every self-check (hourly)
         try:
             logger.info("Triggering auto-evolution cycle...")
             result = self.agent.evolution.evolution_cycle()
             if result.get("bugs_found", 0) > 0:
+                bugs = result.get("bugs_found", 0)
+                fixes = result.get("fixes_attempted", 0)
                 self.agent.memory.remember_short(
-                    f"Evolution: found {result[bugs_found]} bugs, fixed {result.get(fixes_attempted, 0)}",
+                    f"Evolution: found {bugs} bugs, fixed {fixes}",
                     category="evolution"
                 )
-                # Notify via Telegram if available
-                if hasattr(self.agent, "telegram"):
-                    import asyncio
-                    await self.agent.telegram.send_message(
-                        f"Self-evolution complete: {result[bugs_found]} bugs found, "
-                        f"{result.get(fixes_attempted, 0)} fixes attempted"
-                    )
+                await self._notify_master(
+                    f"🔧 Self-evolution: found {bugs} bugs, attempted {fixes} fixes"
+                )
         except Exception as e:
             logger.error(f"Evolution cycle error: {e}")
 

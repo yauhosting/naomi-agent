@@ -279,15 +279,9 @@ class SelfEvolution:
             result = self.auto_fix(bug["file"], bug["issues"])
             fixes.append(result)
 
-        # Push to GitHub
-        try:
-            subprocess.run(
-                ["git", "push", "origin", "main"],
-                cwd=self.project_dir, capture_output=True, timeout=30
-            )
-            logger.info("Evolution pushed to GitHub")
-        except Exception as e:
-            logger.warning(f"Git push failed: {e}")
+        # Commit only — do NOT auto-push. Master reviews via /evolve or manually pushes.
+        # Git push removed for safety: auto-pushed code could contain regressions.
+        logger.info("Evolution committed locally. Use 'git push' manually or /shell git push to push.")
 
         result = {
             "cycle": "complete",

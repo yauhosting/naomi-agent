@@ -49,8 +49,17 @@ def create_dashboard(agent) -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid or missing dashboard token")
 
     @app.get("/", response_class=HTMLResponse)
-    async def index():
-        # Dashboard HTML doesn't need auth (token is embedded in JS)
+    async def index(request: Request):
+        # Require token as query param to access dashboard
+        token = request.query_params.get("token")
+        if token != DASHBOARD_TOKEN:
+            return HTMLResponse(
+                '<html><body style="background:#0a0a0f;color:#e0e0e0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh">'
+                '<div style="text-align:center"><h1>NAOMI Dashboard</h1>'
+                '<p>Access: <code>http://host:18802/?token=YOUR_TOKEN</code></p>'
+                '<p style="color:#888">Token is in <code>data/dashboard_token.txt</code></p></div></body></html>',
+                status_code=401,
+            )
         html = DASHBOARD_HTML.replace("%%TOKEN%%", DASHBOARD_TOKEN)
         return html
 
@@ -135,6 +144,11 @@ def create_dashboard(agent) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
+        # Require token as query param for WebSocket
+        token = websocket.query_params.get("token")
+        if token != DASHBOARD_TOKEN:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
         await websocket.accept()
         connected_clients.add(websocket)
         try:
@@ -301,10 +315,11 @@ const WS_URL = `ws://${location.host}/ws`;
 const API_URL = `http://${location.host}/api`;
 const TOKEN = '%%TOKEN%%';
 const AUTH_HEADERS = {'Content-Type': 'application/json', 'X-Dashboard-Token': TOKEN};
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 let ws;
 
 function connectWebSocket() {
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(WS_URL + '?token=' + TOKEN);
   ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'status') updateStatus(data);
@@ -330,7 +345,7 @@ function updateLog(entries) {
   entries.forEach(e => {
     const div = document.createElement('div');
     div.className = 'log-entry' + (e.category === 'error' ? ' error' : '');
-    div.innerHTML = `<span class="time">${new Date().toLocaleTimeString()}</span><span class="cat">[${e.category}]</span>${e.content}`;
+    div.innerHTML = `<span class="time">${new Date().toLocaleTimeString()}</span><span class="cat">[${esc(e.category)}]</span>${esc(e.content)}`;
     container.prepend(div);
   });
   while (container.children.length > 100) container.removeChild(container.lastChild);
@@ -377,7 +392,7 @@ function addConversation(role, msg) {
   const list = document.getElementById('conversationList');
   const div = document.createElement('div');
   div.className = 'conversation';
-  div.innerHTML = `<div class="role ${role}">${role}</div><div class="msg">${msg}</div>`;
+  div.innerHTML = `<div class="role ${esc(role)}">${esc(role)}</div><div class="msg">${esc(msg)}</div>`;
   list.prepend(div);
 }
 
@@ -396,7 +411,7 @@ async function refreshData() {
     // Update tasks
     const taskList = document.getElementById('taskList');
     taskList.innerHTML = (tasks.tasks || []).map(t =>
-      `<div class="task-item"><span style="font-size:13px">${t.task?.substring(0,60) || '?'}</span><span class="task-status ${t.status}">${t.status}</span></div>`
+      `<div class="task-item"><span style="font-size:13px">${esc(t.task?.substring(0,60)) || '?'}</span><span class="task-status ${esc(t.status)}">${esc(t.status)}</span></div>`
     ).join('');
 
     // Update conversations

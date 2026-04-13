@@ -185,8 +185,16 @@ class ActionExecutor:
                 "query": query,
             }
         except ImportError:
-            self.pip_install("ddgs")
-            return self.web_search(query)
+            install_result = self.pip_install("ddgs")
+            if install_result.get("success"):
+                try:
+                    from ddgs import DDGS
+                    results = list(DDGS().text(query, max_results=5))
+                    return {"success": bool(results), "results": results, "query": query,
+                            "error": "" if results else "No results"}
+                except Exception as e2:
+                    return {"error": f"ddgs installed but failed: {e2}", "success": False, "results": []}
+            return {"error": "Could not install ddgs", "success": False, "results": []}
         except Exception as e:
             return {"error": str(e), "success": False, "results": []}
 
@@ -228,7 +236,11 @@ class ActionExecutor:
 
         except ImportError:
             self.pip_install("beautifulsoup4")
-            return self.web_fetch(url)
+            try:
+                from bs4 import BeautifulSoup
+                return self.web_fetch(url)  # One retry after install
+            except ImportError:
+                return {"error": "Could not install beautifulsoup4", "success": False}
         except Exception as e:
             return {"error": str(e), "success": False, "url": url}
 

@@ -35,7 +35,7 @@ senses:
   web_scan_interval: 3600
 
 dashboard:
-  host: "0.0.0.0"
+  host: "127.0.0.1"     # Localhost only — use SSH tunnel for remote access
   port: 18802
 
 git:

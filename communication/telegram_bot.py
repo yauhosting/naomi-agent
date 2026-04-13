@@ -695,5 +695,9 @@ class TelegramBot:
         """Send a message to the master."""
         await self._send(self.master_id, text)
 
-    def stop(self):
+    async def stop(self):
         self.running = False
+        try:
+            await self.client.aclose()
+        except Exception:
+            pass

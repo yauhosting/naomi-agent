@@ -175,9 +175,7 @@ class NAOMIAgent:
                 telegram_task = asyncio.create_task(self.telegram.start())
                 self.logger.info('Telegram bot started for master %d' % tg_master)
 
-        # Start Telegram bot if configured
-
-        self.logger.info(f"Dashboard: http://0.0.0.0:{dashboard_config.get('port', 18802)}")
+        self.logger.info(f"Dashboard: http://{dashboard_config.get('host', '127.0.0.1')}:{dashboard_config.get('port', 18802)}")
         self.logger.info("NAOMI is alive and running!")
 
         self.memory.remember_long(

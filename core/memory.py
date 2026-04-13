@@ -30,7 +30,7 @@ class Memory:
     def __init__(self, db_path: str = "data/naomi_memory.db"):
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else "data", exist_ok=True)
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_tables()
         self._extraction_lock = False  # Interlock: prevent duplicate extractions
@@ -235,11 +235,16 @@ class Memory:
         return [dict(r) for r in rows]
 
     def skill_used(self, name: str, success: bool = True):
-        field = "success_count" if success else "fail_count"
-        self.conn.execute(
-            f"UPDATE skills SET {field}={field}+1, last_used=? WHERE name=?",
-            (time.time(), name)
-        )
+        if success:
+            self.conn.execute(
+                "UPDATE skills SET success_count=success_count+1, last_used=? WHERE name=?",
+                (time.time(), name)
+            )
+        else:
+            self.conn.execute(
+                "UPDATE skills SET fail_count=fail_count+1, last_used=? WHERE name=?",
+                (time.time(), name)
+            )
         self.conn.commit()
 
     # === Persona Memory ===
@@ -417,7 +422,10 @@ class Memory:
             if conv:
                 # Truncate to fit budget
                 while estimate_tokens(conv) > remaining and len(conv) > 200:
-                    conv = conv[conv.index('\n', 100)+1:]  # Remove oldest line
+                    nl = conv.find('\n', 100)
+                    if nl == -1:
+                        break
+                    conv = conv[nl+1:]  # Remove oldest line
                 if conv:
                     parts.append("=== Conversation ===\n" + conv)
 

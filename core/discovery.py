@@ -170,8 +170,13 @@ If no special tools needed, return empty lists and can_proceed=true."""
     # === Install Python packages ===
     def install_package(self, package: str) -> Dict[str, Any]:
         """Install a Python package and register as skill."""
-        logger.info(f"Installing package: {package}")
-        result = self.actions.execute_shell(f"pip3 install {package}")
+        # Sanitize package name to prevent shell injection
+        import re
+        safe_pkg = re.sub(r'[^a-zA-Z0-9._\-\[\]>=<]', '', package)
+        if not safe_pkg or safe_pkg != package.strip():
+            return {"success": False, "error": f"Invalid package name: {package}"}
+        logger.info(f"Installing package: {safe_pkg}")
+        result = self.actions.execute_shell(f"pip3 install {safe_pkg}")
         if result.get("success"):
             self.memory.learn_skill(
                 name=package,
@@ -195,10 +200,14 @@ If no special tools needed, return empty lists and can_proceed=true."""
     # === Install system tools ===
     def install_tool(self, tool: str) -> Dict[str, Any]:
         """Install a system tool via brew or npm."""
-        logger.info(f"Installing tool: {tool}")
+        import re
+        safe_tool = re.sub(r'[^a-zA-Z0-9._\-@/]', '', tool)
+        if not safe_tool or safe_tool != tool.strip():
+            return {"success": False, "error": f"Invalid tool name: {tool}"}
+        logger.info(f"Installing tool: {safe_tool}")
 
         # Try brew first
-        result = self.actions.execute_shell(f"brew install {tool}")
+        result = self.actions.execute_shell(f"brew install {safe_tool}")
         if result.get("success"):
             self.memory.learn_skill(
                 name=tool, description=f"System tool: {tool}",

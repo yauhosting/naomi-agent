@@ -475,7 +475,8 @@ If multiple commands, separate with &&."""
 
             # Action tasks must have executed steps
             if rtype == "action":
-                executed = result.get("actions_executed", 0)
+                steps = result.get("steps", [])
+                executed = len([s for s in steps if s.get("tool")])
                 if executed == 0:
                     return {"honest": False, "reason": "Action plan had 0 executed steps"}
                 return {"honest": True, "reason": f"Executed {executed} real actions"}

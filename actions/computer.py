@@ -156,7 +156,7 @@ class ComputerControl:
             return result
 
         # Method 3: MiniMax M2.7 vision
-        if self.brain and self.brain._minimax_key:
+        if self.brain and getattr(self.brain, '_minimax_key', ''):
             result = self._vision_via_minimax(prompt, img_b64)
             if result:
                 return result
@@ -245,7 +245,7 @@ class ComputerControl:
             resp = httpx.post(
                 "https://api.minimax.io/anthropic/v1/messages",
                 headers={
-                    "x-api-key": self.brain._api_key,
+                    "x-api-key": self.brain._minimax_key,
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },
@@ -378,10 +378,20 @@ set position of first window to {{{x}, {y}}}'])
     def open_app(self, app_name: str) -> Dict[str, Any]:
         """Open an application."""
         logger.info(f"Opening app: {app_name}")
-        result = _run_shell(f'open -a "{app_name}"')
-        if result["success"]:
-            time.sleep(1)  # Wait for app to launch
-        return {**result, "action": "open_app", "app": app_name}
+        # Use subprocess list form to prevent shell injection
+        try:
+            result = subprocess.run(
+                ["open", "-a", app_name],
+                capture_output=True, text=True, timeout=10,
+            )
+            success = result.returncode == 0
+            if success:
+                time.sleep(1)
+            return {"success": success, "output": result.stdout.strip(),
+                    "error": result.stderr.strip() if not success else "",
+                    "action": "open_app", "app": app_name}
+        except Exception as e:
+            return {"success": False, "error": str(e), "action": "open_app", "app": app_name}
 
     def get_windows(self) -> Dict[str, Any]:
         """Get list of all visible windows."""
@@ -410,8 +420,10 @@ end tell
     def focus_window(self, app_name: str) -> Dict[str, Any]:
         """Bring an app's window to front."""
         logger.info(f"Focusing: {app_name}")
+        # Sanitize app_name to prevent AppleScript injection
+        safe_name = app_name.replace('"', '').replace("\\", "").replace("\n", "")
         script = f'''
-tell application "{app_name}"
+tell application "{safe_name}"
     activate
 end tell
 '''

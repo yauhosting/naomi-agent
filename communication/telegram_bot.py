@@ -74,6 +74,13 @@ class TelegramBot:
             logger.warning(f"Unauthorized access attempt from user {user_id}")
             return
 
+        # Handle voice messages — transcribe to text
+        voice = message.get("voice") or message.get("audio")
+        if voice and not text:
+            text = await self._transcribe_voice(chat_id, voice)
+            if not text:
+                return  # Transcription failed, error already sent
+
         if not text:
             return
 
@@ -885,6 +892,116 @@ class TelegramBot:
         except Exception as e:
             import logging
             logging.getLogger("naomi.telegram").error(f"Background research error: {e}")
+
+    async def _transcribe_voice(self, chat_id: int, voice: dict) -> str:
+        """Download and transcribe a Telegram voice message to text."""
+        file_id = voice.get("file_id")
+        if not file_id:
+            await self._send(chat_id, "無法讀取語音訊息")
+            return ""
+
+        try:
+            await self._send_typing(chat_id)
+
+            # Step 1: Get file path from Telegram
+            resp = await self.client.get(f"{self.base_url}/getFile", params={"file_id": file_id})
+            file_data = resp.json()
+            if not file_data.get("ok"):
+                await self._send(chat_id, "無法下載語音檔案")
+                return ""
+
+            file_path = file_data["result"]["file_path"]
+            download_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+
+            # Step 2: Download voice file
+            voice_resp = await self.client.get(download_url, timeout=30)
+            ogg_path = "/tmp/naomi_voice.ogg"
+            wav_path = "/tmp/naomi_voice.wav"
+            with open(ogg_path, "wb") as f:
+                f.write(voice_resp.content)
+
+            # Step 3: Convert to WAV with ffmpeg
+            import subprocess
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", wav_path],
+                capture_output=True, timeout=30,
+            )
+
+            if not os.path.exists(wav_path):
+                await self._send(chat_id, "語音轉換失敗")
+                return ""
+
+            # Step 4: Transcribe using Whisper (local) or Groq API
+            transcript = await self._run_whisper(wav_path)
+
+            if not transcript:
+                await self._send(chat_id, "語音辨識失敗，請改用文字")
+                return ""
+
+            logger.info(f"Voice transcribed: {transcript[:80]}")
+            await self._send(chat_id, f"🎤 聽到: {transcript[:200]}")
+
+            # Cleanup
+            for p in [ogg_path, wav_path]:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+            return transcript
+
+        except Exception as e:
+            logger.error(f"Voice transcription error: {e}")
+            await self._send(chat_id, f"語音處理出錯: {str(e)[:100]}")
+            return ""
+
+    async def _run_whisper(self, wav_path: str) -> str:
+        """Transcribe audio using local Whisper or Groq API."""
+        # Method 1: Try local whisper
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(wav_path, language="zh")
+            return result.get("text", "").strip()
+        except ImportError:
+            pass
+
+        # Method 2: Try Groq API (free, fast Whisper)
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        if groq_key:
+            try:
+                with open(wav_path, "rb") as f:
+                    audio_data = f.read()
+                resp = await self.client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {groq_key}"},
+                    files={"file": ("audio.wav", audio_data, "audio/wav")},
+                    data={"model": "whisper-large-v3", "language": "zh"},
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("text", "").strip()
+            except Exception as e:
+                logger.debug(f"Groq whisper failed: {e}")
+
+        # Method 3: Use Claude CLI to describe what the user might be saying
+        # (fallback — not real STT, just acknowledges voice was received)
+        import subprocess
+        try:
+            # Install whisper if not present
+            subprocess.run(
+                ["pip3", "install", "--break-system-packages", "openai-whisper"],
+                capture_output=True, timeout=120,
+            )
+            import importlib
+            whisper = importlib.import_module("whisper")
+            model = whisper.load_model("base")
+            result = model.transcribe(wav_path, language="zh")
+            return result.get("text", "").strip()
+        except Exception as e:
+            logger.error(f"Whisper install/run failed: {e}")
+
+        return ""
 
     async def _send_typing(self, chat_id: int):
         """Send 'typing...' indicator to Telegram."""

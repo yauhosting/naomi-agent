@@ -101,6 +101,15 @@ class NAOMIAgent:
         # Initialize persona memory
         self._init_persona()
 
+        # Import knowledge from OpenClaw and Hermes on boot
+        from core.knowledge import import_openclaw_knowledge, import_project_knowledge
+        try:
+            oc_result = import_openclaw_knowledge(self.memory)
+            proj_result = import_project_knowledge(self.memory, PROJECT_DIR)
+            self.logger.info('Knowledge imported: OpenClaw=%s, Project=%s' % (oc_result, proj_result))
+        except Exception as e:
+            self.logger.warning('Knowledge import error: %s' % e)
+
         self.logger.info("All systems initialized")
 
     def _init_persona(self):
@@ -147,19 +156,20 @@ class NAOMIAgent:
 
         # Start Telegram bot if configured
         telegram_task = None
-        tg_config = self.config.get("telegram", {})
-        if tg_config.get("enabled"):
+        tg_config = self.config.get('telegram', {})
+        if tg_config.get('enabled'):
             import os as _os
             from core.brain import load_dotenv
-            load_dotenv(_os.path.join(PROJECT_DIR, ".env"))
-            tg_token = _os.environ.get("TELEGRAM_BOT_TOKEN", "")
-            tg_master = tg_config.get("master_id", 0)
+            load_dotenv(_os.path.join(PROJECT_DIR, '.env'))
+            tg_token = _os.environ.get('TELEGRAM_BOT_TOKEN', '')
+            tg_master = tg_config.get('master_id', 0)
             if tg_token and tg_master:
                 from communication.telegram_bot import TelegramBot
                 self.telegram = TelegramBot(self, tg_token, tg_master)
                 telegram_task = asyncio.create_task(self.telegram.start())
-                self.logger.info(f"Telegram bot started for master {tg_master}")
+                self.logger.info('Telegram bot started for master %d' % tg_master)
 
+        # Start Telegram bot if configured
 
         self.logger.info(f"Dashboard: http://0.0.0.0:{dashboard_config.get('port', 18802)}")
         self.logger.info("NAOMI is alive and running!")

@@ -399,6 +399,25 @@ Respond in JSON:
             category="system"
         )
 
+        # Trigger evolution cycle every self-check (hourly)
+        try:
+            logger.info("Triggering auto-evolution cycle...")
+            result = self.agent.evolution.evolution_cycle()
+            if result.get("bugs_found", 0) > 0:
+                self.agent.memory.remember_short(
+                    f"Evolution: found {result[bugs_found]} bugs, fixed {result.get(fixes_attempted, 0)}",
+                    category="evolution"
+                )
+                # Notify via Telegram if available
+                if hasattr(self.agent, "telegram"):
+                    import asyncio
+                    await self.agent.telegram.send_message(
+                        f"Self-evolution complete: {result[bugs_found]} bugs found, "
+                        f"{result.get(fixes_attempted, 0)} fixes attempted"
+                    )
+        except Exception as e:
+            logger.error(f"Evolution cycle error: {e}")
+
     def stop(self):
         self.running = False
         logger.info("Heartbeat stopping...")

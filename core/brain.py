@@ -250,8 +250,12 @@ class Brain:
         "claude-cli":     ("claude_cli",    None,                         "Claude CLI direct (Max subscription)"),
         "glm":            ("glm",           "glm-5.1",                    "GLM 5.1 (Z.AI, OpenAI compatible)"),
         "glm-turbo":      ("glm",           "glm-5-turbo",                "GLM 5 Turbo (Z.AI, fast)"),
+        "ollama":         ("ollama",        "qwen3.5:35b",                "Ollama Qwen 3.5 35B (local, free)"),
+        "ollama-gemma":   ("ollama",        "juilpark/gemma-4-31B-it-uncensored-heretic:q4_k_m", "Ollama Gemma 4 31B uncensored (local)"),
+        "ollama-glm":     ("ollama",        "glm-4.7-flash:q8_0",        "Ollama GLM 4.7 Flash (local, 30GB)"),
+        "ollama-dolphin":  ("ollama",       "dolphin-llama3:8b",          "Ollama Dolphin Llama3 8B (local, fast)"),
         "minimax":        ("minimax",       "MiniMax-M2.7",               "MiniMax M2.7 (fallback)"),
-        "auto":           ("auto",          None,                         "Auto: API → CLI → GLM → MiniMax fallback"),
+        "auto":           ("auto",          None,                         "Auto: CLI → Ollama → GLM → MiniMax"),
     }
 
     def __init__(self, config: dict):
@@ -264,8 +268,8 @@ class Brain:
         self._anthropic_client = None
 
         # Error failover tracking
-        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0}
-        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0}
+        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0}
+        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0}
         self._max_failures_before_backoff = 3
         self._backoff_seconds = 60  # Skip a failed backend for 60s
 
@@ -745,6 +749,44 @@ class Brain:
         except Exception as e:
             return f"[Brain error: {e}]"
 
+    def _call_ollama(self, prompt: str, system_prompt: str = "",
+                     model: str = None) -> str:
+        """Call Ollama local LLM (OpenAI-compatible API at localhost:11434)."""
+        import httpx
+
+        model = model or self.MODEL_REGISTRY.get(self._active_mode, ("", "qwen3.5:35b", ""))[1]
+        if not model or model in (None, "(CLI default)"):
+            model = "qwen3.5:35b"
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            resp = httpx.post(
+                "http://127.0.0.1:11434/v1/chat/completions",
+                json={"model": model, "messages": messages, "stream": False},
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                # Strip thinking tags if present (Qwen/DeepSeek)
+                if "<think>" in content:
+                    import re
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                self._record_success("ollama")
+                return content
+            else:
+                logger.warning(f"Ollama error {resp.status_code}: {resp.text[:200]}")
+                self._record_failure("ollama")
+                return None
+        except Exception as e:
+            logger.debug(f"Ollama failed: {e}")
+            self._record_failure("ollama")
+            return None
+
     def _call_glm(self, prompt: str, system_prompt: str = "",
                    model: str = None) -> str:
         """Call Z.AI GLM API (OpenAI-compatible format).
@@ -868,6 +910,10 @@ class Brain:
             "minimax2.7": "minimax", "minimax-m2.7": "minimax", "mm": "minimax",
             "glm5": "glm", "glm-5": "glm", "glm5.1": "glm", "glm-5.1": "glm", "zhipu": "glm",
             "glm-turbo": "glm-turbo", "glm5-turbo": "glm-turbo",
+            "qwen": "ollama", "qwen3.5": "ollama", "local": "ollama",
+            "gemma": "ollama-gemma", "gemma4": "ollama-gemma", "uncensored": "ollama-gemma",
+            "dolphin": "ollama-dolphin", "llama": "ollama-dolphin",
+            "glm-local": "ollama-glm", "glm4.7": "ollama-glm",
         }
         name = aliases.get(name, name)
 
@@ -883,6 +929,14 @@ class Brain:
             return {"success": False, "error": "Claude CLI not found"}
         if backend == "glm" and not self._glm_key:
             return {"success": False, "error": "No GLM_API_KEY configured"}
+        if backend == "ollama":
+            try:
+                import httpx
+                r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=3)
+                if r.status_code != 200:
+                    return {"success": False, "error": "Ollama not running"}
+            except Exception:
+                return {"success": False, "error": "Ollama not reachable at localhost:11434"}
         if backend == "minimax" and not self._minimax_key:
             return {"success": False, "error": "No MINIMAX_API_KEY configured"}
 
@@ -977,6 +1031,12 @@ class Brain:
                 return result
             self._record_failure("proxy")
 
+        # Fallback: Ollama (local, free)
+        if self._active_mode in ("auto", "ollama", "ollama-gemma", "ollama-glm", "ollama-dolphin") and self._is_backend_available("ollama"):
+            result = self._call_ollama(prompt, system_prompt)
+            if result:
+                return result
+
         # Fallback: GLM (Z.AI)
         if self._active_mode in ("auto", "glm", "glm-turbo") and self._is_backend_available("glm"):
             if self._glm_key:
@@ -1017,24 +1077,25 @@ class Brain:
         return "light"
 
     def think_smart(self, prompt: str, context: str = "") -> str:
-        """Smart routing: light tasks → cheap model, heavy tasks → Claude CLI."""
+        """Smart routing: light tasks → local/cheap, heavy tasks → Claude CLI."""
         complexity = self._classify_complexity(prompt)
         full = prompt + (f"\n\nContext:\n{context}" if context else "")
         system = ("You are NAOMI, an autonomous AI agent. "
                   "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
 
         if complexity == "light":
-            # Try cheap models first for simple tasks
+            # Try local Ollama first (free, no API cost)
+            if self._is_backend_available("ollama"):
+                result = self._call_ollama(full, system)
+                if result:
+                    logger.debug("Smart route: light task → Ollama (local)")
+                    return result
+            # Then MiniMax
             if self._minimax_key and self._is_backend_available("minimax"):
                 result = self._call_minimax(full, system)
                 if result and not result.startswith("[Brain"):
-                    logger.debug(f"Smart route: light task → MiniMax")
+                    logger.debug("Smart route: light task → MiniMax")
                     self._record_success("minimax")
-                    return result
-            if self._glm_key and self._is_backend_available("glm"):
-                result = self._call_glm(full, system)
-                if result:
-                    logger.debug(f"Smart route: light task → GLM")
                     return result
 
         # Heavy tasks or fallback → Claude CLI (strongest)

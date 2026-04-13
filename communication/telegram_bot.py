@@ -136,6 +136,7 @@ class TelegramBot:
                 "/type <text> - Type text\n"
                 "/key <key> - Press key (return, cmd+c...)\n"
                 "/app [name] - Open app / list windows\n"
+                "/ollama - Manage local Ollama models\n"
                 "/security - Run security scan\n"
                 "/audit - View audit log\n"
                 "/log - Recent activity log\n\n"
@@ -471,6 +472,39 @@ class TelegramBot:
                 f"By backend:\n{backend_lines}"
                 + (f"\n\nHealth:\n{health_lines}" if health_lines else "")
             )
+
+        elif cmd == "/ollama":
+            if not args:
+                # List models
+                try:
+                    resp = await self.client.get("http://127.0.0.1:11434/api/tags", timeout=5)
+                    if resp.status_code == 200:
+                        models = resp.json().get("models", [])
+                        lines = ["🦙 Ollama Models:"]
+                        for m in models:
+                            size_gb = m.get("size", 0) / (1024**3)
+                            lines.append(f"  {m['name']} ({size_gb:.1f}GB)")
+                        lines.append(f"\n/ollama pull <model> — Download new model")
+                        lines.append(f"/model ollama — Switch to Ollama")
+                        await self._send(chat_id, "\n".join(lines))
+                    else:
+                        await self._send(chat_id, "Ollama not running. Start with: ollama serve")
+                except Exception:
+                    await self._send(chat_id, "Ollama not reachable at localhost:11434")
+            else:
+                parts = args.split(None, 1)
+                sub = parts[0].lower()
+                if sub == "pull" and len(parts) > 1:
+                    model_name = parts[1].strip()
+                    await self._send(chat_id, f"⬇️ Pulling {model_name}... (this may take a while)")
+                    result = await self.agent.execute_action("shell", f"ollama pull {model_name}")
+                    output = result.get("output", result.get("error", ""))[:500]
+                    await self._send(chat_id, f"Ollama pull:\n{output}")
+                elif sub == "rm" and len(parts) > 1:
+                    result = await self.agent.execute_action("shell", f"ollama rm {parts[1].strip()}")
+                    await self._send(chat_id, f"{'Removed' if result.get('success') else 'Failed'}")
+                else:
+                    await self._send(chat_id, "Usage: /ollama [pull|rm] <model>")
 
         elif cmd == "/security":
             from core.security import run_security_scan, get_recent_audit

@@ -76,6 +76,10 @@ class TelegramBot:
         if not text:
             return
 
+        # Sanitize input
+        from core.security import sanitize_telegram_input
+        text = sanitize_telegram_input(text)
+
         # Extract reply context — if user replied to a previous message, include it
         reply_context = ""
         reply_to = message.get("reply_to_message")
@@ -124,6 +128,8 @@ class TelegramBot:
                 "/type <text> - Type text\n"
                 "/key <key> - Press key (return, cmd+c...)\n"
                 "/app [name] - Open app / list windows\n"
+                "/security - Run security scan\n"
+                "/audit - View audit log\n"
                 "/log - Recent activity log\n\n"
                 "Or just type anything to give NAOMI a task."
             )
@@ -457,6 +463,34 @@ class TelegramBot:
                 f"By backend:\n{backend_lines}"
                 + (f"\n\nHealth:\n{health_lines}" if health_lines else "")
             )
+
+        elif cmd == "/security":
+            from core.security import run_security_scan, get_recent_audit
+            import os as _os
+            project_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            scan = run_security_scan(project_dir)
+            lines = [f"🔒 Security Scan ({scan['timestamp'][:16]})"]
+            lines.append(f"Issues: {scan['total_issues']} (CRIT:{scan['critical']} HIGH:{scan['high']})")
+            for issue in scan["issues"][:10]:
+                lines.append(f"  [{issue['severity']}] {issue['type']}: {issue.get('detail', issue.get('file', ''))[:60]}")
+            if not scan["issues"]:
+                lines.append("  ✅ No issues found")
+            await self._send(chat_id, "\n".join(lines))
+
+        elif cmd == "/audit":
+            from core.security import get_recent_audit
+            entries = get_recent_audit(limit=15)
+            if not entries:
+                await self._send(chat_id, "No audit log entries yet.")
+            else:
+                lines = ["📋 Recent Audit Log:"]
+                for e in entries[-15:]:
+                    ts = e.get("timestamp", "")[-8:]  # HH:MM:SS
+                    tool = e.get("tool", "?")
+                    params = e.get("params", "")[:40]
+                    ok = "✓" if e.get("success") else "✗"
+                    lines.append(f"  {ts} {ok} [{tool}] {params}")
+                await self._send(chat_id, "\n".join(lines))
 
         elif cmd == "/log":
             entries = self.agent.memory.recall_short(limit=10)

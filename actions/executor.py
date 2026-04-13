@@ -76,13 +76,28 @@ class ActionExecutor:
         return self._get_computer().look_and_act(params)
 
     async def execute(self, action_type: str, params: str) -> Dict[str, Any]:
-        """Execute an action by type."""
+        """Execute an action by type with audit logging."""
+        from core.security import audit_log, check_sensitive_command
+
         handler = self.actions.get(action_type)
         if not handler:
             return {"error": f"Unknown action type: {action_type}", "success": False}
 
+        # Check for sensitive operations (shell commands)
+        if action_type in ("shell", "python"):
+            sensitive = check_sensitive_command(params)
+            if sensitive:
+                logger.warning(f"Sensitive operation detected: {sensitive['description']} — {params[:100]}")
+                audit_log("SENSITIVE_OP", action_type, params, sensitive["description"], success=True)
+                # Log but allow (Master granted full permissions)
+
         try:
             result = handler(params)
+
+            # Audit log every tool call
+            result_summary = str(result.get("output", result.get("error", "")))[:200] if isinstance(result, dict) else str(result)[:200]
+            audit_log("execute", action_type, params, result_summary, success=result.get("success", True) if isinstance(result, dict) else True)
+
             self.memory.remember_short(
                 f"Action [{action_type}]: {params[:100]} -> success",
                 category="action"
@@ -90,6 +105,7 @@ class ActionExecutor:
             return result
         except Exception as e:
             error_msg = str(e)
+            audit_log("execute", action_type, params, error_msg, success=False)
             self.memory.remember_short(
                 f"Action [{action_type}]: {params[:100]} -> FAILED: {error_msg[:200]}",
                 category="error"
@@ -173,11 +189,15 @@ class ActionExecutor:
         return result
 
     def web_search(self, query: str) -> Dict[str, Any]:
-        """Search the web using DuckDuckGo (ddgs package)."""
+        """Search the web using DuckDuckGo with content sanitization."""
+        from core.security import sanitize_external_content
         try:
             from ddgs import DDGS
-            # DDGS().text() returns a generator — must convert to list
             results = list(DDGS().text(query, max_results=5))
+            # Sanitize search result content
+            for r in results:
+                if "body" in r:
+                    r["body"] = sanitize_external_content(r["body"], "web_search")[:300]
             if not results:
                 return {"success": False, "results": [], "query": query,
                         "error": "Search returned no results"}
@@ -201,7 +221,8 @@ class ActionExecutor:
             return {"error": str(e), "success": False, "results": []}
 
     def web_fetch(self, url: str) -> Dict[str, Any]:
-        """Fetch a web page and extract text content."""
+        """Fetch a web page with content sanitization against prompt injection."""
+        from core.security import sanitize_external_content
         logger.info(f"Fetching: {url[:100]}")
         try:
             import httpx
@@ -227,7 +248,7 @@ class ActionExecutor:
                     "success": True,
                     "url": url,
                     "title": title,
-                    "content": text[:10000],
+                    "content": sanitize_external_content(text[:10000], f"web:{url[:50]}"),
                     "length": len(text),
                 }
             elif "application/json" in content_type:

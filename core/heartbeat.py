@@ -565,8 +565,32 @@ If multiple commands, separate with &&."""
         # Memory consolidation
         try:
             self.agent.memory.consolidate()
-        except Exception as e:
-            logger.debug(f"Memory consolidation: {e}")
+        except Exception as e2:
+            logger.debug(f"Memory consolidation: {e2}")
+
+        # Audit log rotation
+        try:
+            from core.security import rotate_audit_log
+            rotate_audit_log(max_lines=5000)
+        except Exception:
+            pass
+
+        # Periodic security scan (every ~1 hour = every 120 beats at 30s interval)
+        if self.beat_count % 120 == 0 and self.beat_count > 0:
+            try:
+                from core.security import run_security_scan
+                import os as _os
+                project_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                scan = run_security_scan(project_dir)
+                if scan.get("critical", 0) > 0 or scan.get("high", 0) > 0:
+                    asyncio.get_event_loop().create_task(
+                        self._notify_master(
+                            f"🔒 Security scan: {scan['critical']} critical, {scan['high']} high issues found!\n"
+                            f"Run /security for details."
+                        )
+                    )
+            except Exception:
+                pass
 
     async def _check_scheduled_tasks(self):
         """Check and execute due scheduled tasks."""

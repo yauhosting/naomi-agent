@@ -104,7 +104,7 @@ class NAOMIAgent:
         self.discovery = CapabilityDiscovery(self.brain, self.memory, self.actions, PROJECT_DIR)
         self.skills = SkillManager(brain=self.brain)
         self.scheduler = Scheduler()
-        self.project = ProjectPipeline(self.brain, self.actions)
+        self.project = ProjectPipeline(self.brain, self.actions, discovery=self.discovery)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

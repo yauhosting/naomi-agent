@@ -35,9 +35,10 @@ os.makedirs(PROJECTS_DIR, exist_ok=True)
 class ProjectPipeline:
     """Multi-phase project executor with persistent state."""
 
-    def __init__(self, brain, executor):
+    def __init__(self, brain, executor, discovery=None):
         self.brain = brain
         self.executor = executor
+        self.discovery = discovery
 
     def _project_file(self, project_id: str) -> str:
         return os.path.join(PROJECTS_DIR, f"{project_id}.json")
@@ -94,12 +95,32 @@ class ProjectPipeline:
             "required": ["project_name", "phases"],
         }
 
+        # Detect available tools for smarter planning
+        available_engines = []
+        if self.discovery:
+            for name in ["godot", "unity-hub", "blender"]:
+                if self.discovery.check_app(name):
+                    available_engines.append(name)
+
+        engine_hint = ""
+        if available_engines:
+            engine_hint = f"\nAvailable engines/tools on this machine: {', '.join(available_engines)}"
+        else:
+            engine_hint = (
+                "\nNo game engines installed yet. Available to install: "
+                "Godot (brew install --cask godot), Unity Hub (brew install --cask unity-hub). "
+                "For simpler projects, use Python (pygame/arcade), web (HTML5/JS), or Godot. "
+                "Include an installation phase if an engine is needed."
+            )
+
         result = self.brain._call_claude_cli(
             f"Decompose this project into 5-8 phases. Each phase should be independently executable.\n\n"
-            f"Project goal: {goal}\n\n"
+            f"Project goal: {goal}\n"
+            f"{engine_hint}\n\n"
             f"For each phase, define: tasks (concrete steps), deliverables (files/outputs), "
             f"and verification (how to check it's done). "
-            f"Use real tools and frameworks. Be specific about file paths relative to the project root.",
+            f"Use real tools and frameworks. Be specific about file paths relative to the project root. "
+            f"Include tool/dependency installation as Phase 1 if needed.",
             json_schema=decompose_schema,
         )
 

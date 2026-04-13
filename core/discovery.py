@@ -104,6 +104,37 @@ KNOWN_PACKAGES = {
     "ai": ["openai", "anthropic"],
     "schedule": ["apscheduler", "schedule"],
     "email": ["aiosmtplib"],
+    "game": ["pygame", "arcade"],
+    "3d": ["pyglet", "panda3d"],
+    "web_game": ["flask", "flask-socketio"],
+}
+
+# System tools installable via brew
+KNOWN_BREW_TOOLS = {
+    "godot": {
+        "cask": "godot",
+        "description": "Godot Engine — open source 2D/3D game engine, GDScript/C#",
+        "check": "ls /Applications/Godot.app",
+        "category": "game_engine",
+    },
+    "unity-hub": {
+        "cask": "unity-hub",
+        "description": "Unity Hub — install/manage Unity editor versions",
+        "check": "ls /Applications/Unity\\ Hub.app",
+        "category": "game_engine",
+    },
+    "blender": {
+        "cask": "blender",
+        "description": "Blender — 3D modeling, animation, rendering",
+        "check": "ls /Applications/Blender.app",
+        "category": "3d_art",
+    },
+    "figma": {
+        "cask": "figma",
+        "description": "Figma — UI/UX design tool",
+        "check": "ls /Applications/Figma.app",
+        "category": "design",
+    },
 }
 
 # MCP config path for Claude Code
@@ -196,6 +227,38 @@ If no special tools needed, return empty lists and can_proceed=true."""
         for pkg in packages:
             results.append({"package": pkg, **self.install_package(pkg)})
         return results
+
+    # === Install brew cask apps (game engines, etc.) ===
+    def install_app(self, name: str) -> Dict[str, Any]:
+        """Install a macOS app via brew cask."""
+        known = KNOWN_BREW_TOOLS.get(name)
+        if known:
+            cask = known["cask"]
+            logger.info(f"Installing app: {name} (brew --cask {cask})")
+            result = self.actions.execute_shell(f"brew install --cask {cask}")
+            if result.get("success"):
+                self.memory.learn_skill(
+                    name=name, description=known["description"],
+                    install_command=f"brew install --cask {cask}",
+                )
+            return {**result, "app": name, "description": known["description"]}
+
+        # Try generic brew cask
+        import re
+        safe = re.sub(r'[^a-zA-Z0-9._\-]', '', name)
+        if not safe:
+            return {"success": False, "error": f"Invalid app name: {name}"}
+        result = self.actions.execute_shell(f"brew install --cask {safe}")
+        return result
+
+    def check_app(self, name: str) -> bool:
+        """Check if an app is installed."""
+        known = KNOWN_BREW_TOOLS.get(name)
+        if known:
+            r = self.actions.execute_shell(known["check"])
+            return r.get("success", False)
+        r = self.actions.execute_shell(f"ls /Applications/{name}*.app 2>/dev/null")
+        return bool(r.get("output", "").strip())
 
     # === Install system tools ===
     def install_tool(self, tool: str) -> Dict[str, Any]:

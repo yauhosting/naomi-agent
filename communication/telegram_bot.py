@@ -185,7 +185,8 @@ class TelegramBot:
                         f"/discover install <mcp-name> — Install MCP server\n"
                         f"/discover pkg <package> — Install Python package\n"
                         f"/discover scan — Scan for missing capabilities\n"
-                        f"/discover tool <name> — Install system tool"
+                        f"/discover tool <name> — Install system tool\n"
+                    f"/discover app <name> — Install macOS app (godot, blender...)"
                     )
                 else:
                     await self._send(chat_id, "Discovery engine not initialized.")
@@ -214,6 +215,15 @@ class TelegramBot:
                     result = self.agent.discovery.install_tool(sub_args)
                     status_text = "installed" if result.get("success") else f"failed: {result.get('error','')[:200]}"
                     await self._send(chat_id, f"Tool {sub_args}: {status_text}")
+
+                elif sub_cmd == "app" and sub_args:
+                    await self._send(chat_id, f"Installing app: {sub_args}...")
+                    await self._send_typing(chat_id)
+                    result = self.agent.discovery.install_app(sub_args)
+                    if result.get("success"):
+                        await self._send(chat_id, f"App '{sub_args}' installed!\n{result.get('description', '')}")
+                    else:
+                        await self._send(chat_id, f"Failed: {result.get('error', result.get('output','')[:200])}")
 
                 elif sub_cmd == "scan":
                     await self._send(chat_id, "Scanning for missing capabilities...")

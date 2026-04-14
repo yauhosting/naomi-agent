@@ -998,6 +998,9 @@ class TelegramBot:
                     persona += "\n\nRecent conversation:\n" + conv_history
 
                 response = self.agent.brain.think_smart(text, persona)
+                if not response or not response.strip():
+                    response = "（Ollama 無回應，請確認 Ollama 是否在運行）"
+                    logger.warning("YUMIKO returned empty response")
                 self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
                 self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
                 self._last_response_len = len(response)
@@ -1468,16 +1471,23 @@ class TelegramBot:
 
     async def _send(self, chat_id: int, text: str):
         """Send a message to Telegram."""
+        if not text or not text.strip():
+            logger.warning("Attempted to send empty message, skipping")
+            return
         # Split long messages (Telegram limit is 4096)
         for i in range(0, len(text), 4000):
             chunk = text[i:i+4000]
+            if not chunk.strip():
+                continue
             try:
-                await self.client.post(
+                resp = await self.client.post(
                     f"{self.base_url}/sendMessage",
                     json={"chat_id": chat_id, "text": chunk, "parse_mode": ""},
                 )
+                if resp.status_code != 200:
+                    logger.error("Telegram send HTTP %d: %s", resp.status_code, resp.text[:200])
             except Exception as e:
-                logger.error(f"Telegram send error: {e}")
+                logger.error("Telegram send error: %s", e)
 
     async def _send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
         """Send a photo to Telegram."""

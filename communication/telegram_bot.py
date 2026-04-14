@@ -479,15 +479,15 @@ class TelegramBot:
                 current = self.agent.brain._private_mode
                 result = self.agent.brain.set_private_mode(not current)
                 if result["private_mode"]:
-                    await self._send(chat_id, "🔒 Private mode ON\n所有對話都在本機處理，不會發送到任何外部 API")
+                    await self._send(chat_id, "😈 YUMIKO mode ON\n所有對話都在本機處理，不會發送到任何外部 API")
                 else:
-                    await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）")
+                    await self._send(chat_id, "😇 NAOMI mode\n恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）")
             elif args.lower() in ("on", "開", "1"):
                 self.agent.brain.set_private_mode(True)
-                await self._send(chat_id, "🔒 Private mode ON")
+                await self._send(chat_id, "😈 YUMIKO mode ON")
             elif args.lower() in ("off", "關", "0"):
                 self.agent.brain.set_private_mode(False)
-                await self._send(chat_id, "🔓 Private mode OFF")
+                await self._send(chat_id, "😇 NAOMI mode")
             elif args.lower().startswith("persona "):
                 custom = args[8:].strip()
                 self.agent.brain.set_private_persona(custom)

@@ -559,6 +559,91 @@ class Brain:
             "verified": True,
         }
 
+    async def _agent_loop_ollama(self, task: str, executor, system_prompt: str = "",
+                                model: str = None, max_iterations: int = 10) -> Dict[str, Any]:
+        """Agent loop using local Ollama — same tools, no external API."""
+        model = model or "qwen3.5:35b"
+        tool_names = [t["name"] for t in NAOMI_TOOLS]
+        tool_desc = "\n".join(f"- {t['name']}: {t['description']}" for t in NAOMI_TOOLS)
+
+        sys = system_prompt or "You are an autonomous agent on macOS."
+        steps = []
+        history = ""
+
+        for iteration in range(1, max_iterations + 1):
+            prompt = (
+                f"{sys}\n\nAvailable tools: {', '.join(tool_names)}\n\n"
+                f"Task: {task}\n"
+                f"{('History:' + chr(10) + history) if history else ''}\n\n"
+                f"Pick ONE tool. Reply in JSON ONLY:\n"
+                f'{{"tool":"name","input":{{...}},"reasoning":"why"}}\n'
+                f"Use task_complete when done."
+            )
+
+            import asyncio as _aio
+            loop = _aio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: self._call_ollama(prompt, model=model)
+            )
+
+            if not response:
+                steps.append({"step": iteration, "error": "Ollama no response"})
+                break
+
+            # Strip thinking tags
+            import re
+            clean = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+
+            # Parse JSON
+            try:
+                if "```json" in clean:
+                    clean = clean.split("```json")[1].split("```")[0]
+                elif "```" in clean:
+                    clean = clean.split("```")[1].split("```")[0]
+                raw = clean.strip()
+                if not raw.startswith("{"):
+                    start = raw.find("{")
+                    end = raw.rfind("}") + 1
+                    if start >= 0 and end > start:
+                        raw = raw[start:end]
+                call = json.loads(raw)
+            except (json.JSONDecodeError, IndexError):
+                # Ollama couldn't produce JSON — return its text as result
+                logger.debug(f"Ollama agent: parse failed at step {iteration}")
+                if iteration == 1:
+                    # First attempt failed — just return the text response
+                    return {"success": True, "result": response[:2000],
+                            "steps": [{"step": 1, "tool": "ollama_direct", "result": response[:500], "success": True}],
+                            "verified": True}
+                continue
+
+            tool_name = call.get("tool", "")
+            tool_input = call.get("input", {})
+
+            if tool_name == "task_complete":
+                steps.append({"step": iteration, "tool": "task_complete",
+                              "input": tool_input, "success": True})
+                return {
+                    "success": tool_input.get("success", True),
+                    "result": tool_input.get("summary", ""),
+                    "steps": steps, "iterations": iteration, "verified": True,
+                }
+
+            if tool_name not in tool_names:
+                history += f"\nStep {iteration}: ERROR — unknown tool '{tool_name}'\n"
+                continue
+
+            exec_result = await self._execute_tool(executor, tool_name, tool_input)
+            output = str(exec_result.get("output", exec_result.get("error", "")))[:500]
+            success = exec_result.get("success", False)
+
+            steps.append({"step": iteration, "tool": tool_name, "input": tool_input,
+                          "result": output[:300], "success": success})
+            history += f"\nStep {iteration}: [{tool_name}] {'OK' if success else 'FAIL'}\nOutput: {output[:300]}\n"
+
+        return {"success": len(steps) > 0, "result": history[:1000],
+                "steps": steps, "iterations": max_iterations, "verified": True}
+
     async def _agent_loop_cli(self, task: str, executor, system_prompt: str = "",
                               max_iterations: int = 15) -> Dict[str, Any]:
         """

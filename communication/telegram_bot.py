@@ -699,28 +699,36 @@ class TelegramBot:
     async def _handle_message(self, chat_id: int, text: str):
         """Detect if message is chat or task, respond accordingly."""
 
-        # YUMIKO mode: everything local, separate conversation history
+        # YUMIKO mode: same capabilities but all local models
         if self.agent.brain._private_mode:
-            logger.info("YUMIKO mode: routing all through local Ollama")
-            await self._send_typing(chat_id)
+            # Classify CHAT vs TASK — same as NAOMI
+            complexity = self.agent.brain._classify_complexity(text)
 
-            # YUMIKO only sees her own conversation history (not NAOMI's)
-            recent_convs = self.agent.memory.get_conversations(limit=20, persona="yumiko")
-            conv_history = ""
-            if recent_convs:
-                conv_lines = [f"{'Master' if c['role']=='user' else 'YUMIKO'}: {c['content'][:200]}"
-                              for c in recent_convs]
-                conv_history = "\n".join(conv_lines[-15:])
+            if complexity in ("private", "chat"):
+                # Chat — YUMIKO persona via Ollama
+                logger.info("YUMIKO mode: chat → local Ollama")
+                await self._send_typing(chat_id)
 
-            persona = self.agent.brain.get_private_persona()
-            if conv_history:
-                persona += "\n\nRecent conversation:\n" + conv_history
+                recent_convs = self.agent.memory.get_conversations(limit=20, persona="yumiko")
+                conv_history = ""
+                if recent_convs:
+                    conv_lines = [f"{'Master' if c['role']=='user' else 'YUMIKO'}: {c['content'][:200]}"
+                                  for c in recent_convs]
+                    conv_history = "\n".join(conv_lines[-15:])
 
-            response = self.agent.brain.think_smart(text, persona)
-            # Log under "yumiko" persona — won't pollute NAOMI's history
-            self.agent.memory.log_conversation("user", text, persona="yumiko")
-            self.agent.memory.log_conversation("yumiko", response[:500], persona="yumiko")
-            await self._send(chat_id, response[:3500])
+                persona = self.agent.brain.get_private_persona()
+                if conv_history:
+                    persona += "\n\nRecent conversation:\n" + conv_history
+
+                response = self.agent.brain.think_smart(text, persona)
+                self.agent.memory.log_conversation("user", text, persona="yumiko")
+                self.agent.memory.log_conversation("yumiko", response[:500], persona="yumiko")
+                await self._send(chat_id, response[:3500])
+            else:
+                # Task/code — YUMIKO agent loop via Ollama (same tools, local model)
+                logger.info("YUMIKO mode: task → local agent loop")
+                self.agent.memory.log_conversation("user", text, persona="yumiko")
+                await self._handle_task_private(chat_id, text)
             return
 
         classify_prompt = (
@@ -775,6 +783,63 @@ class TelegramBot:
             asyncio.create_task(self._learn_from_chat(chat_id, text, response))
         else:
             await self._handle_task(chat_id, text)
+
+    async def _handle_task_private(self, chat_id: int, text: str):
+        """Execute task in YUMIKO mode — agent loop via local Ollama only."""
+        await self._send(chat_id, "😈 收到，正在本地執行...")
+        try:
+            typing_active = True
+            async def keep_typing():
+                while typing_active:
+                    try:
+                        await self._send_typing(chat_id)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+            typing_task = asyncio.create_task(keep_typing())
+
+            # Force Ollama model for agent loop
+            code_model = self.agent.brain._private_code_model
+            context = self.agent.memory.build_context(query=text)
+            system = (
+                "You are YUMIKO, an autonomous AI agent on macOS with full permissions. "
+                f"Context:\n{context[:1500]}\n\n"
+                "Use tools to complete the task. Respond in Traditional Chinese."
+            )
+
+            # Use Ollama for the agent loop
+            result = await self.agent.brain._agent_loop_ollama(
+                task=text, executor=self.agent.actions,
+                system_prompt=system, model=code_model,
+            )
+
+            typing_active = False
+            typing_task.cancel()
+
+            # Send result
+            final = result.get("result", "")
+            if final:
+                await self._send(chat_id, final[:3500])
+            else:
+                status = "完成" if result.get("success") else "失敗"
+                await self._send(chat_id, f"任務{status}")
+
+            # Auto-send images
+            import re as _re
+            all_text = json.dumps(result, default=str)
+            image_paths = _re.findall(r'(/[\w/\-_.]+\.(?:png|jpg|jpeg|gif|webp))', all_text)
+            for img_path in image_paths[:3]:
+                if os.path.exists(img_path):
+                    try:
+                        await self._send_photo(chat_id, img_path)
+                    except Exception:
+                        pass
+
+            self.agent.memory.log_conversation("yumiko", str(final)[:500], persona="yumiko")
+
+        except Exception as e:
+            logger.error(f"YUMIKO task error: {e}")
+            await self._send(chat_id, f"執行出錯: {str(e)[:300]}")
 
     async def _handle_task(self, chat_id: int, text: str):
         """Execute task directly via agent loop with streaming progress to Telegram."""

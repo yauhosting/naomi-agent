@@ -801,6 +801,142 @@ class TelegramBot:
                 ]
                 await self._send(chat_id, "\n".join(lines))
 
+        elif cmd == "/email":
+            gmail = getattr(self.agent, 'gmail', None)
+            if not gmail or not gmail.available:
+                await self._send(chat_id,
+                    "Gmail not configured.\n"
+                    "Put credentials.json in data/gmail_credentials.json\n"
+                    "(Google Cloud Console → OAuth2 → Desktop App)")
+                return
+            if not args or args == "inbox":
+                msgs = gmail.list_messages("is:unread", max_results=5)
+                if not msgs:
+                    await self._send(chat_id, "No unread emails.")
+                else:
+                    lines = ["📬 Unread emails:"]
+                    for m in msgs:
+                        lines.append(f"\n• {m['from'][:40]}\n  {m['subject'][:60]}\n  {m['snippet'][:80]}")
+                    await self._send(chat_id, "\n".join(lines))
+            elif args.startswith("read "):
+                msg_id = args[5:].strip()
+                msg = gmail.read_message(msg_id)
+                if msg:
+                    await self._send(chat_id,
+                        f"From: {msg['from']}\n"
+                        f"Subject: {msg['subject']}\n"
+                        f"Date: {msg['date']}\n\n"
+                        f"{msg['body'][:2000]}")
+                else:
+                    await self._send(chat_id, "Message not found.")
+            elif args.startswith("send "):
+                # /email send to@example.com | Subject | Body
+                parts = args[5:].split("|", 2)
+                if len(parts) < 3:
+                    await self._send(chat_id, "Usage: /email send to@email.com | Subject | Body")
+                    return
+                to, subject, body = [p.strip() for p in parts]
+                msg_id = gmail.send_message(to, subject, body)
+                if msg_id:
+                    await self._send(chat_id, f"✅ Email sent to {to}")
+                else:
+                    await self._send(chat_id, "❌ Failed to send email")
+            elif args.startswith("search "):
+                query = args[7:].strip()
+                msgs = gmail.search(query, max_results=5)
+                if not msgs:
+                    await self._send(chat_id, f"No results for: {query}")
+                else:
+                    lines = [f"🔍 Search: {query}"]
+                    for m in msgs:
+                        lines.append(f"\n• {m['from'][:40]}\n  {m['subject'][:60]}")
+                    await self._send(chat_id, "\n".join(lines))
+            else:
+                await self._send(chat_id,
+                    "/email — unread inbox\n"
+                    "/email read <id> — read full message\n"
+                    "/email send to|subject|body — send\n"
+                    "/email search <query> — search")
+
+        elif cmd == "/cal":
+            cal = getattr(self.agent, 'calendar', None)
+            if not cal or not cal.available:
+                await self._send(chat_id,
+                    "Calendar not configured.\n"
+                    "Put credentials.json in data/gmail_credentials.json\n"
+                    "Enable Calendar API in Google Cloud Console.")
+                return
+            if not args or args == "today":
+                events = cal.today_events()
+                if not events:
+                    await self._send(chat_id, "📅 No events today.")
+                else:
+                    lines = ["📅 Today's events:"]
+                    for ev in events:
+                        start = ev['start']
+                        if 'T' in start:
+                            start = start[11:16]  # Extract HH:MM
+                        lines.append(f"  {start} — {ev['summary']}")
+                        if ev['location']:
+                            lines.append(f"    📍 {ev['location'][:50]}")
+                    await self._send(chat_id, "\n".join(lines))
+            elif args == "week":
+                events = cal.list_events(days=7)
+                if not events:
+                    await self._send(chat_id, "No events this week.")
+                else:
+                    lines = ["📅 This week:"]
+                    for ev in events:
+                        start = ev['start'][:16].replace('T', ' ')
+                        lines.append(f"  {start} — {ev['summary']}")
+                    await self._send(chat_id, "\n".join(lines))
+            elif args.startswith("add "):
+                # Natural language: /cal add Meeting with JW tomorrow at 3pm for 1 hour
+                text = args[4:].strip()
+                result = cal.quick_add(text)
+                if result:
+                    await self._send(chat_id, f"✅ Event created: {result.get('summary', text)}")
+                else:
+                    await self._send(chat_id, "❌ Failed to create event")
+            elif args.startswith("search "):
+                query = args[7:].strip()
+                events = cal.search_events(query)
+                if not events:
+                    await self._send(chat_id, f"No events matching: {query}")
+                else:
+                    lines = [f"🔍 Events: {query}"]
+                    for ev in events:
+                        lines.append(f"  {ev['start'][:16]} — {ev['summary']}")
+                    await self._send(chat_id, "\n".join(lines))
+            else:
+                await self._send(chat_id,
+                    "/cal — today's events\n"
+                    "/cal week — this week\n"
+                    "/cal add <natural language> — create event\n"
+                    "/cal search <query> — search events")
+
+        elif cmd == "/voice":
+            if not args:
+                # Toggle voice reply mode
+                current = getattr(self, '_voice_mode', False)
+                self._voice_mode = not current
+                status = "ON" if self._voice_mode else "OFF"
+                await self._send(chat_id, f"🎙 Voice reply mode: {status}")
+            elif args.lower() in ("on", "開", "1"):
+                self._voice_mode = True
+                await self._send(chat_id, "🎙 Voice reply mode: ON")
+            elif args.lower() in ("off", "關", "0"):
+                self._voice_mode = False
+                await self._send(chat_id, "🎙 Voice reply mode: OFF")
+            else:
+                # /voice <text> — synthesize and send as voice
+                from core.tts import text_to_speech
+                audio_path = await text_to_speech(args)
+                if audio_path:
+                    await self._send_voice(chat_id, audio_path)
+                else:
+                    await self._send(chat_id, "TTS failed. Need ffmpeg installed.")
+
         else:
             await self._send(chat_id, f"Unknown command: {cmd}\nType /start for help.")
 
@@ -939,6 +1075,10 @@ class TelegramBot:
                     self.agent.memory_agent.on_conversation_turn(text, response)
                 )
             asyncio.create_task(self._learn_from_chat(chat_id, text, response))
+
+            # v1.3: TTS voice reply if voice mode is on
+            if getattr(self, '_voice_mode', False):
+                asyncio.create_task(self._send_tts_reply(chat_id, response))
 
             # v1.2: Check if persona drift should trigger
             if drift:
@@ -1373,6 +1513,38 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Telegram send photo error: {e}")
             await self._send(chat_id, f"Screenshot saved at: {photo_path}\n(Failed to send photo: {e})")
+
+    async def _send_tts_reply(self, chat_id: int, text: str):
+        """Background task: synthesize text and send as voice message."""
+        try:
+            from core.tts import text_to_speech
+            audio_path = await text_to_speech(text[:1500])
+            if audio_path:
+                await self._send_voice(chat_id, audio_path)
+                # Cleanup
+                try:
+                    os.unlink(audio_path)
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.debug("TTS reply failed: %s", e)
+
+    async def _send_voice(self, chat_id: int, audio_path: str):
+        """Send a voice message to Telegram."""
+        try:
+            with open(audio_path, "rb") as f:
+                audio_data = f.read()
+            files = {"voice": ("voice.ogg", audio_data, "audio/ogg")}
+            data = {"chat_id": str(chat_id)}
+            await self.client.post(
+                f"{self.base_url}/sendVoice",
+                data=data,
+                files=files,
+                timeout=30,
+            )
+        except Exception as e:
+            logger.error("Telegram send voice error: %s", e)
+            await self._send(chat_id, "(Voice send failed)")
 
     async def send_message(self, text: str):
         """Send a message to the master."""

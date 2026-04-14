@@ -45,6 +45,8 @@ from core.scheduler import Scheduler
 from core.project import ProjectPipeline
 from core.session import SessionManager
 from core.persona_drift import PersonaDrift
+from core.email_client import GmailClient
+from core.calendar_client import CalendarClient
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -152,6 +154,8 @@ class NAOMIAgent:
         self.project = ProjectPipeline(self.brain, self.actions, discovery=self.discovery)
         self.session_manager = SessionManager(self.memory)
         self.persona_drift = PersonaDrift(self.brain, self.memory)
+        self.gmail = GmailClient()
+        self.calendar = CalendarClient()
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

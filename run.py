@@ -81,7 +81,11 @@ def main():
     def shutdown(signum, frame):
         logger.info("Shutdown signal received")
         process.terminate()
-        process.wait(timeout=10)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
         observer.stop()
         sys.exit(0)
 
@@ -89,6 +93,8 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
 
     logger.info("Launcher ready — watching for file changes + supervising process")
+
+    stable_since = time.time()
 
     while True:
         # Check for code changes → hot reload
@@ -104,6 +110,7 @@ def main():
             process = start_agent()
             backoff = MIN_BACKOFF
             consecutive_crashes = 0
+            stable_since = time.time()
             continue
 
         # Check if process crashed
@@ -125,13 +132,15 @@ def main():
 
             # If stable for 3 minutes, reset backoff
             if consecutive_crashes > 5:
-                logger.error("Too many crashes — check logs. Still retrying...")
+                logger.error("Too many consecutive crashes (%d) — consider investigating", consecutive_crashes)
         else:
-            # Process running — reset crash counter if stable
-            if consecutive_crashes > 0:
-                # Check if process has been running for > 60s
-                pass  # Could track start time, but keep simple
-            time.sleep(1)
+            # Process is running; reset backoff if stable for 3 minutes
+            if time.time() - stable_since > 180:
+                backoff = MIN_BACKOFF
+                consecutive_crashes = 0
+                stable_since = time.time()
+
+        time.sleep(1)
 
     observer.stop()
     observer.join()

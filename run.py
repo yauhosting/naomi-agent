@@ -12,14 +12,16 @@ import subprocess
 import logging
 from pathlib import Path
 
-# Lazy-import watchdog — install if missing
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "watchdog"])
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler
+    print(
+        "Missing required dependency: watchdog\n"
+        "Install it with: pip install watchdog",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 PROJECT_DIR = Path(__file__).parent
 LOG_FMT = "[%(asctime)s] %(levelname)-7s %(message)s"
@@ -29,6 +31,8 @@ logger = logging.getLogger("launcher")
 # Backoff limits
 MIN_BACKOFF = 2
 MAX_BACKOFF = 60
+# If the process runs longer than this (seconds), reset backoff
+STABLE_THRESHOLD = 30
 
 
 class CodeChangeHandler(FileSystemEventHandler):
@@ -50,7 +54,7 @@ class CodeChangeHandler(FileSystemEventHandler):
         # Skip data/ and __pycache__
         if rel.startswith("data/") or "__pycache__" in rel:
             return
-        logger.info("File changed: %s → scheduling reload", rel)
+        logger.info("File changed: %s -> scheduling reload", rel)
         self.changed = True
 
 
@@ -61,6 +65,16 @@ def start_agent() -> subprocess.Popen:
         [sys.executable, str(PROJECT_DIR / "naomi.py")],
         cwd=str(PROJECT_DIR),
     )
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    """Gracefully terminate a process, killing it if it doesn't stop in time."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 def main():
@@ -74,19 +88,21 @@ def main():
     observer.schedule(handler, str(PROJECT_DIR), recursive=False)
     observer.start()
 
-    process = start_agent()
+    # Use a mutable container so the shutdown closure always sees the current process
+    proc_holder = [start_agent()]
     backoff = MIN_BACKOFF
     consecutive_crashes = 0
+    shutting_down = False
 
-    def shutdown(signum, frame):
-        logger.info("Shutdown signal received")
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+    def shutdown(signum, _frame):
+        nonlocal shutting_down
+        if shutting_down:
+            return
+        shutting_down = True
+        logger.info("Shutdown signal received (signal %d)", signum)
+        _terminate_process(proc_holder[0])
         observer.stop()
+        observer.join()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -96,54 +112,59 @@ def main():
 
     stable_since = time.time()
 
-    while True:
-        # Check for code changes → hot reload
-        if handler.changed:
-            handler.changed = False
-            logger.info("Hot reload: restarting NAOMI...")
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            process = start_agent()
-            backoff = MIN_BACKOFF
-            consecutive_crashes = 0
-            stable_since = time.time()
-            continue
-
-        # Check if process crashed
-        retcode = process.poll()
-        if retcode is not None:
-            consecutive_crashes += 1
-            if retcode == 0:
-                logger.info("NAOMI exited cleanly (code 0)")
-                break
-
-            logger.warning(
-                "NAOMI crashed (code %d, crash #%d) — restarting in %ds",
-                retcode, consecutive_crashes, backoff,
-            )
-            time.sleep(backoff)
-            process = start_agent()
-            # Exponential backoff, reset after 3 successful minutes
-            backoff = min(backoff * 2, MAX_BACKOFF)
-
-            # If stable for 3 minutes, reset backoff
-            if consecutive_crashes > 5:
-                logger.error("Too many consecutive crashes (%d) — consider investigating", consecutive_crashes)
-        else:
-            # Process is running; reset backoff if stable for 3 minutes
-            if time.time() - stable_since > 180:
+    try:
+        while True:
+            # Check for code changes -> hot reload
+            if handler.changed:
+                handler.changed = False
+                logger.info("Hot reload: restarting NAOMI...")
+                _terminate_process(proc_holder[0])
+                proc_holder[0] = start_agent()
                 backoff = MIN_BACKOFF
                 consecutive_crashes = 0
                 stable_since = time.time()
+                continue
 
-        time.sleep(1)
+            # Check if process crashed
+            retcode = proc_holder[0].poll()
+            if retcode is not None:
+                if retcode == 0:
+                    logger.info("NAOMI exited cleanly (code 0)")
+                    break
 
-    observer.stop()
-    observer.join()
+                elapsed = time.time() - stable_since
+                consecutive_crashes += 1
+                logger.warning(
+                    "NAOMI crashed (exit code %d, crash #%d, uptime %.1fs)",
+                    retcode,
+                    consecutive_crashes,
+                    elapsed,
+                )
+
+                # Reset backoff if the process was stable long enough
+                if elapsed >= STABLE_THRESHOLD:
+                    backoff = MIN_BACKOFF
+                    consecutive_crashes = 1
+
+                logger.info("Restarting in %d seconds (backoff)...", backoff)
+                time.sleep(backoff)
+
+                # Exponential backoff capped at MAX_BACKOFF
+                backoff = min(backoff * 2, MAX_BACKOFF)
+
+                proc_holder[0] = start_agent()
+                stable_since = time.time()
+                continue
+
+            time.sleep(0.5)
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Launcher encountered an unexpected error")
+        _terminate_process(proc_holder[0])
+    finally:
+        observer.stop()
+        observer.join()
 
 
 if __name__ == "__main__":

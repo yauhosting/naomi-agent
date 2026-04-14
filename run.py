@@ -10,6 +10,7 @@ import time
 import signal
 import subprocess
 import logging
+import threading
 from pathlib import Path
 
 try:
@@ -39,17 +40,29 @@ class CodeChangeHandler(FileSystemEventHandler):
     """Detect .py file changes and signal reload."""
 
     def __init__(self):
-        self.changed = False
-        self.last_event = 0.0
+        self._lock = threading.Lock()
+        self._changed = False
+        self._last_event = 0.0
+
+    @property
+    def changed(self) -> bool:
+        with self._lock:
+            return self._changed
+
+    @changed.setter
+    def changed(self, value: bool) -> None:
+        with self._lock:
+            self._changed = value
 
     def on_modified(self, event):
         if not event.src_path.endswith(".py"):
             return
-        # Debounce: ignore events within 1 second
         now = time.time()
-        if now - self.last_event < 1.0:
-            return
-        self.last_event = now
+        with self._lock:
+            # Debounce: ignore events within 1 second
+            if now - self._last_event < 1.0:
+                return
+            self._last_event = now
         rel = os.path.relpath(event.src_path, PROJECT_DIR)
         # Skip data/ and __pycache__
         if rel.startswith("data/") or "__pycache__" in rel:
@@ -80,7 +93,7 @@ def _terminate_process(proc: subprocess.Popen) -> None:
 def main():
     handler = CodeChangeHandler()
     observer = Observer()
-    # Watch core/, communication/, actions/, senses/, and root .py files
+    # Watch core/, communication/, actions/, senses/, navigation/ and root .py files
     for watch_dir in ["core", "communication", "actions", "senses", "navigation"]:
         path = PROJECT_DIR / watch_dir
         if path.exists():
@@ -129,42 +142,36 @@ def main():
             retcode = proc_holder[0].poll()
             if retcode is not None:
                 if retcode == 0:
-                    logger.info("NAOMI exited cleanly (code 0)")
+                    logger.info("NAOMI exited cleanly (code 0). Shutting down.")
                     break
 
-                elapsed = time.time() - stable_since
                 consecutive_crashes += 1
-                logger.warning(
-                    "NAOMI crashed (exit code %d, crash #%d, uptime %.1fs)",
-                    retcode,
-                    consecutive_crashes,
-                    elapsed,
-                )
+                elapsed = time.time() - stable_since
 
-                # Reset backoff if the process was stable long enough
-                if elapsed >= STABLE_THRESHOLD:
+                # Reset backoff if process was stable long enough
+                if elapsed > STABLE_THRESHOLD:
                     backoff = MIN_BACKOFF
                     consecutive_crashes = 1
 
-                logger.info("Restarting in %d seconds (backoff)...", backoff)
+                logger.warning(
+                    "NAOMI crashed (code %d). Crash #%d — restarting in %ds...",
+                    retcode,
+                    consecutive_crashes,
+                    backoff,
+                )
                 time.sleep(backoff)
-
-                # Exponential backoff capped at MAX_BACKOFF
                 backoff = min(backoff * 2, MAX_BACKOFF)
-
                 proc_holder[0] = start_agent()
                 stable_since = time.time()
                 continue
 
             time.sleep(0.5)
-    except SystemExit:
-        raise
-    except Exception:
-        logger.exception("Launcher encountered an unexpected error")
-        _terminate_process(proc_holder[0])
     finally:
         observer.stop()
         observer.join()
+        # Ensure child process is cleaned up
+        if proc_holder[0].poll() is None:
+            _terminate_process(proc_holder[0])
 
 
 if __name__ == "__main__":

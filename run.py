@@ -58,8 +58,10 @@ class CodeChangeHandler(FileSystemEventHandler):
         if not event.src_path.endswith(".py"):
             return
         rel = os.path.relpath(event.src_path, PROJECT_DIR)
+        # Normalize to forward slashes for cross-platform comparison
+        rel_normalized = rel.replace(os.sep, "/")
         # Skip data/ and __pycache__
-        if rel.startswith("data/") or "__pycache__" in rel:
+        if rel_normalized.startswith("data/") or "__pycache__" in rel_normalized:
             return
         now = time.time()
         with self._lock:
@@ -133,25 +135,32 @@ def main():
                 logger.info("Hot reload: restarting NAOMI...")
                 _terminate_process(proc_holder[0])
                 proc_holder[0] = start_agent()
+                stable_since = time.time()
                 backoff = MIN_BACKOFF
                 consecutive_crashes = 0
-                stable_since = time.time()
+                time.sleep(0.5)
                 continue
 
-            # Check if process has exited (crash or normal exit)
+            # Check if the process has exited (crashed)
             ret = proc_holder[0].poll()
             if ret is not None:
-                elapsed = time.time() - stable_since
-                if elapsed > STABLE_THRESHOLD:
-                    # Process ran long enough — reset backoff
+                if shutting_down:
+                    break
+                uptime = time.time() - stable_since
+                if uptime >= STABLE_THRESHOLD:
+                    logger.info(
+                        "Process ran for %.1fs (stable) — resetting backoff", uptime
+                    )
                     backoff = MIN_BACKOFF
                     consecutive_crashes = 0
+                else:
+                    consecutive_crashes += 1
 
-                consecutive_crashes += 1
                 logger.warning(
-                    "NAOMI exited with code %d (crash #%d). "
-                    "Restarting in %ds...",
+                    "Process exited with code %d (uptime=%.1fs, crashes=%d) — "
+                    "restarting in %ds...",
                     ret,
+                    uptime,
                     consecutive_crashes,
                     backoff,
                 )
@@ -159,16 +168,14 @@ def main():
                 backoff = min(backoff * 2, MAX_BACKOFF)
                 proc_holder[0] = start_agent()
                 stable_since = time.time()
+            else:
+                time.sleep(0.5)
 
-            time.sleep(0.5)
-    except SystemExit:
-        raise
-    except Exception:
-        logger.exception("Launcher encountered an unexpected error")
-        _terminate_process(proc_holder[0])
-        observer.stop()
-        observer.join()
-        sys.exit(1)
+    finally:
+        if not shutting_down:
+            _terminate_process(proc_holder[0])
+            observer.stop()
+            observer.join()
 
 
 if __name__ == "__main__":

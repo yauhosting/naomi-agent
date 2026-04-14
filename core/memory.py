@@ -89,6 +89,11 @@ class Memory:
             timestamp REAL NOT NULL,
             persona TEXT DEFAULT 'naomi'
         )''')
+        # Migrate: add persona column if missing (existing DBs)
+        try:
+            c.execute("SELECT persona FROM conversations LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE conversations ADD COLUMN persona TEXT DEFAULT 'naomi'")
         # v2: Compressed session summaries
         c.execute('''CREATE TABLE IF NOT EXISTS session_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -86,7 +86,8 @@ class Memory:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            timestamp REAL NOT NULL
+            timestamp REAL NOT NULL,
+            persona TEXT DEFAULT 'naomi'
         )''')
         # v2: Compressed session summaries
         c.execute('''CREATE TABLE IF NOT EXISTS session_summaries (
@@ -303,14 +304,13 @@ class Memory:
         return [dict(r) for r in rows]
 
     # === Conversation Log ===
-    MAX_CONVERSATIONS = 500  # Keep last 500 conversations
+    MAX_CONVERSATIONS = 500
 
-    def log_conversation(self, role: str, content: str):
+    def log_conversation(self, role: str, content: str, persona: str = "naomi"):
         self.conn.execute(
-            "INSERT INTO conversations (role, content, timestamp) VALUES (?, ?, ?)",
-            (role, content, time.time())
+            "INSERT INTO conversations (role, content, timestamp, persona) VALUES (?, ?, ?, ?)",
+            (role, content, time.time(), persona)
         )
-        # Trim old conversations to prevent unbounded growth
         self.conn.execute(
             "DELETE FROM conversations WHERE id NOT IN "
             "(SELECT id FROM conversations ORDER BY timestamp DESC LIMIT ?)",
@@ -318,10 +318,17 @@ class Memory:
         )
         self.conn.commit()
 
-    def get_conversations(self, limit: int = 50) -> List[Dict]:
-        rows = self.conn.execute(
-            "SELECT * FROM conversations ORDER BY timestamp DESC LIMIT ?", (limit,)
-        ).fetchall()
+    def get_conversations(self, limit: int = 50, persona: str = None) -> List[Dict]:
+        """Get conversations, optionally filtered by persona."""
+        if persona:
+            rows = self.conn.execute(
+                "SELECT * FROM conversations WHERE persona=? ORDER BY timestamp DESC LIMIT ?",
+                (persona, limit)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM conversations ORDER BY timestamp DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
     # === v2: Progressive Context Compression ===

@@ -699,27 +699,27 @@ class TelegramBot:
     async def _handle_message(self, chat_id: int, text: str):
         """Detect if message is chat or task, respond accordingly."""
 
-        # Private mode: everything goes through think_smart (all local Ollama)
+        # YUMIKO mode: everything local, separate conversation history
         if self.agent.brain._private_mode:
-            logger.info("Private mode: routing all through local Ollama")
+            logger.info("YUMIKO mode: routing all through local Ollama")
             await self._send_typing(chat_id)
 
-            # Multi-turn context
-            recent_convs = self.agent.memory.get_conversations(limit=20)
+            # YUMIKO only sees her own conversation history (not NAOMI's)
+            recent_convs = self.agent.memory.get_conversations(limit=20, persona="yumiko")
             conv_history = ""
             if recent_convs:
-                conv_lines = [f"{'Master' if c['role']=='user' else 'NAOMI'}: {c['content'][:200]}"
+                conv_lines = [f"{'Master' if c['role']=='user' else 'YUMIKO'}: {c['content'][:200]}"
                               for c in recent_convs]
                 conv_history = "\n".join(conv_lines[-15:])
 
-            # Use active persona
             persona = self.agent.brain.get_private_persona()
             if conv_history:
                 persona += "\n\nRecent conversation:\n" + conv_history
 
             response = self.agent.brain.think_smart(text, persona)
-            self.agent.memory.log_conversation("user", text)
-            self.agent.memory.log_conversation("naomi", response[:500])
+            # Log under "yumiko" persona — won't pollute NAOMI's history
+            self.agent.memory.log_conversation("user", text, persona="yumiko")
+            self.agent.memory.log_conversation("yumiko", response[:500], persona="yumiko")
             await self._send(chat_id, response[:3500])
             return
 
@@ -746,7 +746,7 @@ class TelegramBot:
             await self._send_typing(chat_id)
 
             # Multi-turn context: include recent conversation history
-            recent_convs = self.agent.memory.get_conversations(limit=30)
+            recent_convs = self.agent.memory.get_conversations(limit=30, persona="naomi")
             conv_history = ""
             if recent_convs:
                 conv_lines = []
@@ -763,17 +763,16 @@ class TelegramBot:
                 persona += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
 
             response = self.agent.brain._think(text, persona)
-            self.agent.memory.log_conversation("user", text)
-            self.agent.memory.log_conversation("naomi", response[:500])
+            self.agent.memory.log_conversation("user", text, persona="naomi")
+            self.agent.memory.log_conversation("naomi", response[:500], persona="naomi")
             await self._send(chat_id, response[:3500])
 
-            # Background: extract memories via sub-agent + learn from chat
-            import asyncio as _asyncio
+            # Background: extract memories (NAOMI only, not YUMIKO)
             if hasattr(self.agent, 'memory_agent'):
-                _asyncio.create_task(
+                asyncio.create_task(
                     self.agent.memory_agent.on_conversation_turn(text, response)
                 )
-            _asyncio.create_task(self._learn_from_chat(chat_id, text, response))
+            asyncio.create_task(self._learn_from_chat(chat_id, text, response))
         else:
             await self._handle_task(chat_id, text)
 

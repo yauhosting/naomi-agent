@@ -689,14 +689,7 @@ class Brain:
         )
 
         if not response:
-            # CLI unavailable — fallback to brain._think for task execution
-            logger.warning("CLI unavailable, falling back to brain._think for task")
-            fallback = self._think(task, sys)
-            if fallback and not fallback.startswith("[Brain"):
-                return {"success": True, "result": fallback[:2000],
-                        "steps": [{"action": "brain_fallback", "result": fallback[:500]}],
-                        "verified": False}
-            return {"success": False, "result": "All backends unavailable",
+            return {"success": False, "result": "CLI returned no response",
                     "steps": [], "verified": False}
 
         # Parse the structured response
@@ -963,13 +956,7 @@ class Brain:
                 cmd + [prompt],
                 capture_output=True, text=True,
                 timeout=self.primary.get("timeout", 120),
-                env={
-                    **os.environ,
-                    "LANG": "en_US.UTF-8",
-                    "PATH": os.path.expanduser("~/.nvm/versions/node/v22.22.2/bin")
-                           + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-                           + ":" + os.environ.get("PATH", ""),
-                },
+                env={**os.environ, "LANG": "en_US.UTF-8"},
                 cwd="/tmp",
             )
             output = result.stdout.strip()
@@ -1104,18 +1091,6 @@ class Brain:
             self._backoff_until[backend] = time.time() + self._backoff_seconds
             logger.warning(f"Backend {backend}: {self._consecutive_failures[backend]} consecutive failures, "
                            f"backing off for {self._backoff_seconds}s")
-
-    def _call_fast(self, prompt: str, system_prompt: str = "") -> str:
-        """Fast path for simple tasks. Uses MiniMax/Ollama, skips Claude CLI."""
-        if self._minimax_key and self._is_backend_available("minimax"):
-            result = self._call_minimax(prompt, system_prompt)
-            if result and not result.startswith("[Brain"):
-                return result
-        if self._is_backend_available("ollama"):
-            result = self._call_ollama(prompt, system_prompt)
-            if result:
-                return result
-        return self._think(prompt, system_prompt)
 
     def _think(self, prompt: str, system_prompt: str = "") -> str:
         """Text response with automatic failover and backoff."""

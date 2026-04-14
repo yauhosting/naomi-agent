@@ -27,7 +27,10 @@ class Memory:
     MAX_SHORT_TERM = 50
     FRESHNESS_DECAY_DAYS = 7  # Memories older than this get lower weight
 
-    def __init__(self, db_path: str = "data/naomi_memory.db"):
+    def __init__(self, db_path="data/naomi_memory.db"):
+        # Accept both string path and config dict
+        if isinstance(db_path, dict):
+            db_path = db_path.get("db_path", "data/naomi_memory.db")
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else "data", exist_ok=True)
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)

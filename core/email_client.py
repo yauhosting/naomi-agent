@@ -25,6 +25,10 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 CREDENTIALS_PATH = DATA_DIR / "gmail_credentials.json"
 TOKEN_PATH = DATA_DIR / "gmail_token.json"
 
+# Fallback: OpenClaw pre-migration credentials
+_OPENCLAW_CREDS = Path.home() / ".openclaw.pre-migration" / "credentials" / "google_credentials.json"
+_OPENCLAW_CREDS_V2 = Path.home() / ".openclaw" / "credentials" / "google_credentials.json"
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
@@ -41,8 +45,10 @@ class GmailClient:
 
     @property
     def available(self) -> bool:
-        """Check if Gmail credentials exist."""
-        return CREDENTIALS_PATH.exists()
+        """Check if Gmail credentials exist (check multiple paths)."""
+        return (CREDENTIALS_PATH.exists()
+                or _OPENCLAW_CREDS.exists()
+                or _OPENCLAW_CREDS_V2.exists())
 
     def _ensure_deps(self):
         """Install Google API dependencies if missing."""
@@ -75,17 +81,32 @@ class GmailClient:
         if TOKEN_PATH.exists():
             creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
 
+        # Check if existing token has all required scopes
+        if creds and creds.valid:
+            existing_scopes = set(creds.scopes or [])
+            required_scopes = set(SCOPES)
+            if not required_scopes.issubset(existing_scopes):
+                logger.info("Gmail token missing scopes, re-authorizing: need %s",
+                            required_scopes - existing_scopes)
+                creds = None  # Force re-auth with full scopes
+
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                if not CREDENTIALS_PATH.exists():
+                # Find credentials file from multiple paths
+                cred_path = None
+                for p in [CREDENTIALS_PATH, _OPENCLAW_CREDS, _OPENCLAW_CREDS_V2]:
+                    if p.exists():
+                        cred_path = p
+                        break
+                if not cred_path:
                     raise FileNotFoundError(
-                        f"Gmail credentials not found at {CREDENTIALS_PATH}. "
-                        "Download from Google Cloud Console."
+                        f"Gmail credentials not found. Checked:\n"
+                        f"  {CREDENTIALS_PATH}\n  {_OPENCLAW_CREDS}\n  {_OPENCLAW_CREDS_V2}"
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    str(CREDENTIALS_PATH), SCOPES
+                    str(cred_path), SCOPES
                 )
                 creds = flow.run_local_server(port=18810)
 

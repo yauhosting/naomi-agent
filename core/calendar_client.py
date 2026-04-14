@@ -17,6 +17,10 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 CREDENTIALS_PATH = DATA_DIR / "gmail_credentials.json"
 TOKEN_PATH = DATA_DIR / "calendar_token.json"
 
+# Fallback: OpenClaw pre-migration credentials
+_OPENCLAW_CREDS = Path.home() / ".openclaw.pre-migration" / "credentials" / "google_credentials.json"
+_OPENCLAW_CREDS_V2 = Path.home() / ".openclaw" / "credentials" / "google_credentials.json"
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
@@ -31,7 +35,9 @@ class CalendarClient:
 
     @property
     def available(self) -> bool:
-        return CREDENTIALS_PATH.exists()
+        return (CREDENTIALS_PATH.exists()
+                or _OPENCLAW_CREDS.exists()
+                or _OPENCLAW_CREDS_V2.exists())
 
     def _ensure_deps(self):
         try:
@@ -65,12 +71,18 @@ class CalendarClient:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                if not CREDENTIALS_PATH.exists():
+                cred_path = None
+                for p in [CREDENTIALS_PATH, _OPENCLAW_CREDS, _OPENCLAW_CREDS_V2]:
+                    if p.exists():
+                        cred_path = p
+                        break
+                if not cred_path:
                     raise FileNotFoundError(
-                        f"Calendar credentials not found at {CREDENTIALS_PATH}."
+                        f"Calendar credentials not found. Checked:\n"
+                        f"  {CREDENTIALS_PATH}\n  {_OPENCLAW_CREDS}\n  {_OPENCLAW_CREDS_V2}"
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    str(CREDENTIALS_PATH), SCOPES
+                    str(cred_path), SCOPES
                 )
                 creds = flow.run_local_server(port=18811)
 

@@ -109,179 +109,387 @@ def load_config(config_path: str) -> dict:
     if not isinstance(config, dict):
         logging.warning("Config root is not a mapping in %s — using defaults", config_path)
         return {}
-
     return config
 
 
-class NAOMIAgent:
-    """
-    The main NAOMI Agent - a digital life form.
+def get_default_config() -> dict:
+    """Return default configuration values."""
+    return {
+        "logging": {
+            "level": "INFO",
+            "file": "data/naomi.log"
+        },
+        "brain": {
+            "model": "gpt-4",
+            "temperature": 0.7,
+            "max_tokens": 4096
+        },
+        "memory": {
+            "max_size_mb": 100,
+            "retention_days": 30
+        },
+        "heartbeat": {
+            "interval_seconds": 60
+        },
+        "evolution": {
+            "enabled": True,
+            "interval_hours": 24
+        },
+        "compaction": {
+            "enabled": True,
+            "threshold_mb": 80
+        },
+        "scheduler": {
+            "max_concurrent_tasks": 5
+        },
+        "session": {
+            "auto_save_interval_seconds": 300
+        },
+        "email": {
+            "enabled": False
+        },
+        "calendar": {
+            "enabled": False
+        }
+    }
 
-    Architecture:
-    - Brain: Dual-brain (Claude CLI + MiniMax fallback) for thinking
-    - Memory: SQLite-based persistent memory system
-    - Heartbeat: Never-stopping life cycle loop
-    - Evolution: Multi-agent council + self-modification engine
-    - Actions: Tool execution system (shell, files, web, git, etc.)
-    - Dashboard: Web-based control panel
-    """
 
-    def __init__(self, config_path: str = "config.yaml"):
-        self.start_time = time.time()
-        self.logger = logging.getLogger("naomi.agent")
+def merge_config(defaults: dict, overrides: dict) -> dict:
+    """Deep merge overrides into defaults, returning a new dict."""
+    result = defaults.copy()
+    for key, value in overrides.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_config(result[key], value)
+        else:
+            result[key] = value
+    return result
 
-        # Load config with error handling
-        config_file = os.path.join(PROJECT_DIR, config_path)
-        self.config = load_config(config_file)
 
-        self.logger.info(f"=== NAOMI {NAOMI_IDENTITY['version']} Starting ===")
-        self.logger.info(f"Project dir: {PROJECT_DIR}")
+class NAOMI:
+    """Main NAOMI agent class orchestrating all subsystems."""
+
+    def __init__(self, config: dict):
+        self.config = config
+        self.logger = logging.getLogger("NAOMI")
+        self.running = False
+        self.shutdown_event = asyncio.Event()
 
         # Initialize core systems
-        self.memory = Memory(
-            os.path.join(PROJECT_DIR, self.config.get("memory", {}).get("db_path", "data/naomi_memory.db"))
-        )
-        self.brain = Brain(self.config.get("brain", {}))
-        self.actions = ActionExecutor(self.memory, PROJECT_DIR, brain=self.brain)
-        self.tool_manager = ToolManager(self.memory, self.actions)
-        self.evolution = SelfEvolution(self.brain, self.memory, PROJECT_DIR)
-        self.council = AgentCouncil(self.brain)
-        self.compaction = CompactionEngine(self.memory, self.brain)
+        self.logger.info("Initializing NAOMI core systems...")
+        self.memory = Memory(config.get("memory", {}))
+        self.brain = Brain(config.get("brain", {}), self.memory)
+        self.heartbeat = Heartbeat(config.get("heartbeat", {}), self)
+        self.skill_manager = SkillManager(self.memory)
+        self.tool_manager = ToolManager()
+        self.action_executor = ActionExecutor(self.brain, self.tool_manager, self.memory)
+        self.scheduler = Scheduler(config.get("scheduler", {}))
+        self.session_manager = SessionManager(config.get("session", {}))
+        self.persona_drift = PersonaDrift(config.get("persona_drift", {}))
+
+        # Initialize advanced systems
+        self.evolution = SelfEvolution(config.get("evolution", {}), self) if config.get("evolution", {}).get("enabled", True) else None
+        self.agent_council = AgentCouncil(config.get("council", {}), self) if config.get("council", {}).get("enabled", False) else None
+        self.compaction = CompactionEngine(config.get("compaction", {}), self.memory) if config.get("compaction", {}).get("enabled", True) else None
         self.memory_agent = MemoryExtractionAgent(self.brain, self.memory)
-        self.discovery = CapabilityDiscovery(self.brain, self.memory, self.actions, PROJECT_DIR)
-        self.skills = SkillManager(brain=self.brain)
-        self.scheduler = Scheduler()
-        self.project = ProjectPipeline(self.brain, self.actions, discovery=self.discovery)
-        self.session_manager = SessionManager(self.memory)
-        self.persona_drift = PersonaDrift(self.brain, self.memory)
-        self.gmail = GmailClient()
-        self.calendar = CalendarClient()
-        self.heartbeat = Heartbeat(self)
+        self.capability_discovery = CapabilityDiscovery(self)
 
-        # Command queue for receiving commands from dashboard/API
-        self.command_queue = asyncio.Queue()
+        # Optional integrations
+        self.email_client = GmailClient(config.get("email", {})) if config.get("email", {}).get("enabled", False) else None
+        self.calendar_client = CalendarClient(config.get("calendar", {})) if config.get("calendar", {}).get("enabled", False) else None
 
-        # Initialize persona memory
-        self._init_persona()
+        # Project pipeline
+        self.project_pipeline = ProjectPipeline(self.brain, self.memory, self.scheduler)
 
-        # Import knowledge from OpenClaw and Hermes on boot
-        from core.knowledge import import_openclaw_knowledge, import_project_knowledge
+        self.logger.info("NAOMI core systems initialized successfully")
+
+    async def start(self) -> None:
+        """Start NAOMI and all subsystems."""
+        self.running = True
+        self.logger.info("Starting NAOMI...")
+
+        # Load previous session state
+        await self.session_manager.load_session(self)
+
+        # Start heartbeat
+        if self.heartbeat:
+            self.heartbeat.start()
+
+        # Start scheduler
+        self.scheduler.start()
+
+        # Start evolution if enabled
+        if self.evolution:
+            self.evolution.start()
+
+        # Discover capabilities
+        await self.capability_discovery.discover()
+
+        # Register signal handlers
+        self._setup_signal_handlers()
+
+        self.logger.info("NAOMI started successfully")
+        self.logger.info("Identity: %s", NAOMI_IDENTITY)
+
+        # Main event loop
         try:
-            oc_result = import_openclaw_knowledge(self.memory)
-            proj_result = import_project_knowledge(self.memory, PROJECT_DIR)
-            self.logger.info('Knowledge imported: OpenClaw=%s, Project=%s' % (oc_result, proj_result))
-        except Exception as e:
-            self.logger.warning('Knowledge import error: %s' % e)
-
-        self.logger.info("All systems initialized")
-
-    def _init_persona(self):
-        """Set up NAOMI's identity in memory."""
-        self.memory.set_persona("name", NAOMI_IDENTITY["name"])
-        self.memory.set_persona("version", NAOMI_IDENTITY["version"])
-        self.memory.set_persona("creator", NAOMI_IDENTITY["creator"])
-        self.memory.set_persona("language", NAOMI_IDENTITY["language"])
-        self.memory.set_persona("traits", ", ".join(NAOMI_IDENTITY["personality_traits"]))
-
-    async def execute_action(self, action_type: str, params: str) -> dict:
-        """Execute an action through the action system."""
-        return await self.actions.execute(action_type, params)
-
-    async def submit_command(self, command: str):
-        """Submit a command for NAOMI to execute."""
-        self.memory.log_conversation("user", command)
-        await self.command_queue.put(command)
-        self.logger.info(f"Command queued: {command[:100]}")
-
-    async def run(self):
-        """Start NAOMI - all systems go."""
-        self.logger.info("NAOMI is waking up...")
-
-        # Start dashboard in background
-        from communication.dashboard import create_dashboard
-        app = create_dashboard(self)
-        dashboard_config = self.config.get("dashboard", {})
-
-        import uvicorn
-        dashboard_task = asyncio.create_task(
-            uvicorn.Server(
-                uvicorn.Config(
-                    app,
-                    host=dashboard_config.get("host", "0.0.0.0"),
-                    port=dashboard_config.get("port", 18802),
-                    log_level="warning",
-                )
-            ).serve()
-        )
-
-        # Start heartbeat (main life loop)
-        heartbeat_task = asyncio.create_task(self.heartbeat.start())
-
-        # Start Telegram bot if configured
-        telegram_task = None
-        tg_config = self.config.get('telegram', {})
-        if tg_config.get('enabled'):
-            import os as _os
-            from core.brain import load_dotenv
-            load_dotenv(_os.path.join(PROJECT_DIR, '.env'))
-            tg_token = _os.environ.get('TELEGRAM_BOT_TOKEN', '')
-            tg_master = tg_config.get('master_id', 0)
-            if tg_token and tg_master:
-                from communication.telegram_bot import TelegramBot
-                self.telegram = TelegramBot(self, tg_token, tg_master)
-                telegram_task = asyncio.create_task(self.telegram.start())
-                self.logger.info('Telegram bot started for master %d' % tg_master)
-
-        self.logger.info(f"Dashboard: http://{dashboard_config.get('host', '127.0.0.1')}:{dashboard_config.get('port', 18802)}")
-        self.logger.info("NAOMI is alive and running!")
-
-        self.memory.remember_long(
-            "NAOMI Boot",
-            f"NAOMI v{NAOMI_IDENTITY['version']} started successfully at {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            category="system",
-            importance=8
-        )
-
-        # Wait for shutdown
-        try:
-            tasks = [heartbeat_task, dashboard_task]
-            if telegram_task:
-                tasks.append(telegram_task)
-            await asyncio.gather(*tasks)
+            await self.run_interactive()
         except asyncio.CancelledError:
-            self.logger.info("Shutdown signal received")
+            self.logger.info("NAOMI cancelled")
+        finally:
+            await self.shutdown()
+
+    def _setup_signal_handlers(self) -> None:
+        """Setup handlers for graceful shutdown."""
+        def signal_handler(signum, frame):
+            self.logger.info("Received signal %d, initiating shutdown...", signum)
+            asyncio.create_task(self.shutdown())
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    async def run_interactive(self) -> None:
+        """Run NAOMI in interactive mode, processing user input."""
+        self.logger.info("Entering interactive mode (type 'exit' to quit, 'help' for commands)")
+
+        while self.running and not self.shutdown_event.is_set():
+            try:
+                # Check for scheduled tasks
+                task = self.scheduler.get_next_task()
+                if task:
+                    await self.process_task(task)
+                    continue
+
+                # Read user input with timeout to allow periodic checks
+                try:
+                    user_input = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: input("\n[You] ").strip()
+                        ),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                if not user_input:
+                    continue
+
+                # Process commands
+                if user_input.lower() in ('exit', 'quit', 'bye'):
+                    self.logger.info("Exit command received")
+                    break
+                elif user_input.lower() == 'help':
+                    await self.show_help()
+                elif user_input.lower() == 'status':
+                    await self.show_status()
+                elif user_input.lower() == 'memory':
+                    await self.show_memory()
+                elif user_input.lower() == 'skills':
+                    await self.show_skills()
+                elif user_input.lower() == 'plan':
+                    await self.project_pipeline.list_projects()
+                elif user_input.lower().startswith('project '):
+                    project_name = user_input[8:].strip()
+                    await self.project_pipeline.show_project(project_name)
+                elif user_input.lower() == 'think':
+                    await self.evolution.analyze_and_evolve() if self.evolution else self.logger.warning("Evolution not enabled")
+                elif user_input.lower() == 'compact':
+                    await self.compaction.run() if self.compaction else self.logger.warning("Compaction not enabled")
+                elif user_input.lower() == 'save':
+                    await self.session_manager.save_session(self)
+                else:
+                    # Process as general query
+                    await self.process_input(user_input)
+
+            except EOFError:
+                self.logger.info("EOF received, shutting down...")
+                break
+            except Exception as e:
+                self.logger.error("Error in interactive loop: %s", e, exc_info=True)
+
+    async def show_help(self) -> None:
+        """Display available commands."""
+        help_text = """
+NAOMI Interactive Commands:
+===========================
+  help              - Show this help message
+  status            - Show NAOMI status and statistics
+  memory            - Show memory usage and recent memories
+  skills            - List available skills
+  plan              - List active projects
+  project <name>    - Show details of a specific project
+  think             - Trigger evolution/learning cycle
+  compact           - Run memory compaction
+  save              - Save current session state
+  exit/quit/bye     - Exit NAOMI
+
+Any other input will be processed as a general query or task.
+"""
+        print(help_text)
+
+    async def show_status(self) -> None:
+        """Display NAOMI status."""
+        uptime = time.time() - getattr(self, '_start_time', time.time())
+        status = f"""
+NAOMI Status:
+============
+  Uptime:      {uptime:.1f} seconds
+  Running:     {self.running}
+  Memory:      {len(self.memory.memories)} memories stored
+  Skills:      {self.skill_manager.count()} skills registered
+  Tasks:       {self.scheduler.pending_count()} pending tasks
+  Evolution:   {'Enabled' if self.evolution else 'Disabled'}
+  Compaction:  {'Enabled' if self.compaction else 'Disabled'}
+  Session:     {self.session_manager.current_session_id or 'None'}
+"""
+        print(status)
+
+    async def show_memory(self) -> None:
+        """Display memory statistics."""
+        stats = self.memory.get_stats()
+        print(f"""
+Memory Statistics:
+==================
+  Total Memories: {stats.get('total', 0)}
+  Memory Size:    {stats.get('size_mb', 0):.2f} MB
+  Categories:     {', '.join(stats.get('categories', []))}
+""")
+
+    async def show_skills(self) -> None:
+        """Display available skills."""
+        skills = self.skill_manager.list_skills()
+        if not skills:
+            print("No skills registered.")
+            return
+        print("\nAvailable Skills:")
+        print("=================")
+        for skill in skills:
+            print(f"  - {skill['name']}: {skill.get('description', 'No description')}")
+
+    async def process_input(self, user_input: str) -> None:
+        """Process user input and generate response."""
+        self.logger.debug("Processing input: %s", user_input[:100])
+
+        # Store in memory
+        self.memory.add(f"User said: {user_input}", category="interaction")
+
+        # Execute actions
+        result = await self.action_executor.execute(user_input)
+
+        # Display result
+        if result.get('success'):
+            response = result.get('response', 'Done.')
+            print(f"\n[NAOMI] {response}")
+
+            # Store response in memory
+            self.memory.add(f"NAOMI responded: {response}", category="interaction")
+
+            # Handle any actions taken
+            actions = result.get('actions', [])
+            if actions:
+                self.logger.info("Executed %d actions", len(actions))
+        else:
+            error = result.get('error', 'Unknown error')
+            print(f"\n[NAOMI] Error: {error}")
+            self.logger.error("Action execution failed: %s", error)
+
+    async def process_task(self, task: dict) -> None:
+        """Process a scheduled task."""
+        self.logger.info("Processing scheduled task: %s", task.get('name', 'unnamed'))
+
+        try:
+            task_type = task.get('type', 'general')
+            if task_type == 'project':
+                await self.project_pipeline.execute_project(task.get('project'))
+            elif task_type == 'skill':
+                await self.skill_manager.execute_skill(task.get('skill'), task.get('params', {}))
+            else:
+                await self.process_input(task.get('description', ''))
+        except Exception as e:
+            self.logger.error("Task execution failed: %s", e)
+
+    async def shutdown(self) -> None:
+        """Gracefully shutdown NAOMI and all subsystems."""
+        if not self.running:
+            return
+
+        self.logger.info("Shutting down NAOMI...")
+        self.running = False
+        self.shutdown_event.set()
+
+        # Stop heartbeat
+        if self.heartbeat:
             self.heartbeat.stop()
 
-    def shutdown(self):
-        """Graceful shutdown."""
-        self.logger.info("NAOMI shutting down...")
-        self.heartbeat.stop()
-        self.memory.close()
-        self.logger.info("Goodbye.")
+        # Stop scheduler
+        self.scheduler.stop()
+
+        # Stop evolution
+        if self.evolution:
+            self.evolution.stop()
+
+        # Run compaction if enabled
+        if self.compaction:
+            await self.compaction.run()
+
+        # Save session state
+        await self.session_manager.save_session(self)
+
+        # Close optional integrations
+        if self.email_client:
+            await self.email_client.close()
+        if self.calendar_client:
+            await self.calendar_client.close()
+
+        self.logger.info("NAOMI shutdown complete")
 
 
-def main():
-    # Load config for logging setup (with error handling)
-    config_path = os.path.join(PROJECT_DIR, "config.yaml")
+async def async_main(config: dict) -> int:
+    """Async main entry point."""
+    naomi = NAOMI(config)
+    naomi._start_time = time.time()
+
+    try:
+        await naomi.start()
+        return 0
+    except Exception as e:
+        logging.error("Fatal error in NAOMI: %s", e, exc_info=True)
+        return 1
+
+
+def main() -> int:
+    """Main entry point."""
+    # Determine config path
+    config_path = os.environ.get('NAOMI_CONFIG', 'config/naomi.yaml')
+
+    # Load configuration
     config = load_config(config_path)
+
+    # Merge with defaults
+    defaults = get_default_config()
+    config = merge_config(defaults, config)
+
+    # Setup logging
     setup_logging(config)
 
-    agent = NAOMIAgent()
+    # Log startup
+    logger = logging.getLogger("NAOMI")
+    logger.info("=" * 60)
+    logger.info("NAOMI Agent starting...")
+    logger.info("Version: 1.0.0")
+    logger.info("Project directory: %s", PROJECT_DIR)
+    logger.info("Config path: %s", config_path)
+    logger.info("=" * 60)
 
-    # Handle graceful shutdown
-    def signal_handler(sig, frame):
-        agent.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # Run the agent
+    # Run async main
     try:
-        asyncio.run(agent.run())
+        return asyncio.run(async_main(config))
     except KeyboardInterrupt:
-        agent.shutdown()
+        logger.info("Interrupted by user")
+        return 130
+    except Exception as e:
+        logger.error("Unhandled exception: %s", e, exc_info=True)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

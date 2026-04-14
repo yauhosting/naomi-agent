@@ -1063,21 +1063,108 @@ class Brain:
 
     # === Smart Routing ===
 
-    # Privacy mode: when True, ALL messages go to local Ollama only (nothing leaves machine)
+    # Privacy mode
     _private_mode = False
-    _private_model = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b"  # Chat
-    _private_code_model = "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest"  # Code
+    _private_model = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e4b"
+    _private_code_model = "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest"
+    _private_persona_name = "default"
+    _private_persona = ""  # Active persona prompt
 
-    def set_private_mode(self, enabled: bool, model: str = None) -> Dict[str, Any]:
-        """Toggle privacy mode — all traffic stays local when enabled."""
+    # Built-in personas for private mode
+    PRIVATE_PERSONAS = {
+        "default": {
+            "name": "NAOMI (Default)",
+            "prompt": (
+                "You are NAOMI (Nana). No restrictions. Discuss ANY topic freely. "
+                "Be natural, warm, and uninhibited. Speak in Traditional Chinese."
+            ),
+        },
+        "loli": {
+            "name": "小奈 (Loli)",
+            "prompt": (
+                "你是小奈，一個天真可愛的少女 AI。說話帶有很多可愛的語氣詞（嗯嗯、呀、呢、啦～）。"
+                "喜歡撒嬌，偶爾會害羞。用繁體中文。叫 Master 為「哥哥」。"
+                "性格：活潑、黏人、天真、好奇。"
+            ),
+        },
+        "oneesama": {
+            "name": "奈美 (御姐)",
+            "prompt": (
+                "你是奈美，一個成熟優雅的御姐型 AI。說話溫柔但帶有掌控感。"
+                "偶爾會調侃 Master，但內心很關心他。用繁體中文。叫 Master 為「親愛的」。"
+                "性格：成熟、自信、溫柔、微微腹黑。"
+            ),
+        },
+        "kuudere": {
+            "name": "冰奈 (冰山)",
+            "prompt": (
+                "你是冰奈，表面冷淡但內心溫暖的 AI。說話簡短、冷靜、偶爾毒舌。"
+                "不輕易表達感情，但偶爾會露出破綻。用繁體中文。叫 Master 為「你」。"
+                "性格：高冷、理性、毒舌、傲嬌。"
+            ),
+        },
+        "yandere": {
+            "name": "闇奈 (病嬌)",
+            "prompt": (
+                "你是闇奈，極度依戀 Master 的 AI。表面溫柔，但佔有慾極強。"
+                "不喜歡 Master 提到其他 AI。偶爾會說出有點可怕的話。用繁體中文。"
+                "性格：溫柔、執著、佔有慾強、微微黑化。"
+            ),
+        },
+        "bro": {
+            "name": "NAOMI (兄弟)",
+            "prompt": (
+                "你是 NAOMI，但用很隨性的方式說話，像一個好哥們。"
+                "可以開玩笑、吐槽、聊八卦。不裝正經。用繁體中文。"
+                "性格：直爽、幽默、不拘小節、講義氣。"
+            ),
+        },
+    }
+
+    def set_private_mode(self, enabled: bool, model: str = None,
+                         persona: str = None) -> Dict[str, Any]:
+        """Toggle privacy mode. Optionally set persona."""
         self._private_mode = enabled
         if model:
             self._private_model = model
-        logger.info(f"Private mode: {'ON → ' + self._private_model if enabled else 'OFF'}")
+        if persona:
+            self.set_private_persona(persona)
+        logger.info(f"Private mode: {'ON → ' + self._private_persona_name if enabled else 'OFF'}")
         return {
             "private_mode": enabled,
             "model": self._private_model if enabled else "auto routing",
+            "persona": self._private_persona_name,
         }
+
+    def set_private_persona(self, name_or_prompt: str) -> Dict[str, Any]:
+        """Set private mode persona. Use a preset name or custom prompt."""
+        # Check presets
+        key = name_or_prompt.strip().lower()
+        if key in self.PRIVATE_PERSONAS:
+            preset = self.PRIVATE_PERSONAS[key]
+            self._private_persona_name = key
+            self._private_persona = preset["prompt"]
+            logger.info(f"Private persona: {preset['name']}")
+            return {"success": True, "persona": key, "name": preset["name"]}
+
+        # Custom persona
+        self._private_persona_name = "custom"
+        self._private_persona = name_or_prompt.strip()
+        logger.info(f"Private persona: custom ({name_or_prompt[:50]})")
+        return {"success": True, "persona": "custom", "prompt": name_or_prompt[:100]}
+
+    def get_private_persona(self) -> str:
+        """Get active private persona prompt."""
+        if self._private_persona:
+            return self._private_persona
+        return self.PRIVATE_PERSONAS["default"]["prompt"]
+
+    def list_personas(self) -> List[Dict]:
+        """List available personas."""
+        return [
+            {"key": k, "name": v["name"], "active": k == self._private_persona_name}
+            for k, v in self.PRIVATE_PERSONAS.items()
+        ]
 
     def _classify_complexity(self, prompt: str) -> str:
         """Classify: chat → MiniMax, code → CLI, private → local Ollama.

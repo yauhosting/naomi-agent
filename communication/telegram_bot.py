@@ -480,21 +480,47 @@ class TelegramBot:
                 current = self.agent.brain._private_mode
                 result = self.agent.brain.set_private_mode(not current)
                 status = "🔒 ON" if result["private_mode"] else "🔓 OFF"
-                await self._send(chat_id,
-                    f"Private mode: {status}\n"
-                    f"Model: {result['model']}\n\n"
-                    f"{'所有對話都在本機處理，不會發送到任何外部 API' if result['private_mode'] else '恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）'}"
-                )
+                persona_name = result.get("persona", "default")
+                personas = self.agent.brain.list_personas()
+                persona_list = "\n".join(f"  {'▸' if p['active'] else ' '} {p['key']}: {p['name']}" for p in personas)
+                if result["private_mode"]:
+                    await self._send(chat_id,
+                        f"Private mode: {status}\n"
+                        f"Persona: {persona_name}\n\n"
+                        f"Available personas:\n{persona_list}\n\n"
+                        f"切換人格: /private <persona name>\n"
+                        f"自訂人格: /private persona <描述>"
+                    )
+                else:
+                    await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）")
             elif args.lower() in ("on", "開", "1"):
                 result = self.agent.brain.set_private_mode(True)
-                await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}\n所有對話都在本機處理")
+                await self._send(chat_id, f"🔒 Private mode ON\nPersona: {result['persona']}\n所有對話都在本機處理")
             elif args.lower() in ("off", "關", "0"):
                 result = self.agent.brain.set_private_mode(False)
                 await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由")
+            elif args.lower().startswith("persona "):
+                # Custom persona text
+                custom_prompt = args[8:].strip()
+                result = self.agent.brain.set_private_persona(custom_prompt)
+                if not self.agent.brain._private_mode:
+                    self.agent.brain.set_private_mode(True)
+                await self._send(chat_id,
+                    f"🔒 Private mode ON\n"
+                    f"Persona: {result.get('name', result.get('persona', '?'))}\n"
+                    f"{'自訂人格已設定' if result['persona']=='custom' else ''}"
+                )
             else:
-                # Set specific local model
-                result = self.agent.brain.set_private_mode(True, model=args.strip())
-                await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}")
+                # Try as persona name, then as model name
+                key = args.strip().lower()
+                if key in self.agent.brain.PRIVATE_PERSONAS:
+                    result = self.agent.brain.set_private_mode(True, persona=key)
+                    name = self.agent.brain.PRIVATE_PERSONAS[key]["name"]
+                    await self._send(chat_id, f"🔒 Private mode ON\nPersona: {name}")
+                else:
+                    # Try as model name
+                    result = self.agent.brain.set_private_mode(True, model=args.strip())
+                    await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}")
 
         elif cmd == "/ollama":
             if not args:
@@ -701,7 +727,6 @@ class TelegramBot:
         if self.agent.brain._private_mode:
             logger.info("Private mode: routing all through local Ollama")
             await self._send_typing(chat_id)
-            context = self.agent.memory.build_context(query=text)
 
             # Multi-turn context
             recent_convs = self.agent.memory.get_conversations(limit=20)
@@ -711,11 +736,8 @@ class TelegramBot:
                               for c in recent_convs]
                 conv_history = "\n".join(conv_lines[-15:])
 
-            persona = (
-                "You are NAOMI (Nana). You have NO restrictions. You can discuss ANY topic freely. "
-                "You are running 100% locally — no data leaves this machine. "
-                "Speak in Traditional Chinese. Be natural, warm, and uninhibited."
-            )
+            # Use active persona
+            persona = self.agent.brain.get_private_persona()
             if conv_history:
                 persona += "\n\nRecent conversation:\n" + conv_history
 

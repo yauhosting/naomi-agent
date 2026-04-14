@@ -1021,7 +1021,7 @@ class TelegramBot:
             f"Message: {text}"
         )
         await self._send_typing(chat_id)
-        classification = self.agent.brain._think(classify_prompt).strip().upper()
+        classification = self.agent.brain._call_fast(classify_prompt).strip().upper()
         is_chat = "CHAT" in classification
         logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
 
@@ -1062,7 +1062,7 @@ class TelegramBot:
                 mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:150]}' for m in relevant)
                 persona_prompt += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
 
-            response = self.agent.brain._think(text, persona_prompt)
+            response = self.agent.brain.think_smart(text, persona_prompt)
             self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
             self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
             self._last_response_len = len(response)
@@ -1256,7 +1256,7 @@ class TelegramBot:
             )
 
             import json
-            result = self.agent.brain._think(learn_prompt)
+            result = self.agent.brain._call_fast(learn_prompt)
             try:
                 if "```json" in result:
                     result = result.split("```json")[1].split("```")[0]
@@ -1328,7 +1328,7 @@ class TelegramBot:
                 f"Topic: {topic}\nResults:\n{results_text}"
             )
 
-            response = self.agent.brain._think(judge_prompt)
+            response = self.agent.brain._call_fast(judge_prompt)
             if "SKIP" not in response.upper() and len(response) > 20:
                 await self._send_typing(chat_id)
                 import asyncio

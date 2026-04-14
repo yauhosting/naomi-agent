@@ -476,51 +476,27 @@ class TelegramBot:
 
         elif cmd == "/private":
             if not args:
-                # Toggle
                 current = self.agent.brain._private_mode
                 result = self.agent.brain.set_private_mode(not current)
-                status = "🔒 ON" if result["private_mode"] else "🔓 OFF"
-                persona_name = result.get("persona", "default")
-                personas = self.agent.brain.list_personas()
-                persona_list = "\n".join(f"  {'▸' if p['active'] else ' '} {p['key']}: {p['name']}" for p in personas)
                 if result["private_mode"]:
-                    await self._send(chat_id,
-                        f"Private mode: {status}\n"
-                        f"Persona: {persona_name}\n\n"
-                        f"Available personas:\n{persona_list}\n\n"
-                        f"切換人格: /private <persona name>\n"
-                        f"自訂人格: /private persona <描述>"
-                    )
+                    await self._send(chat_id, "🔒 Private mode ON\n所有對話都在本機處理，不會發送到任何外部 API")
                 else:
                     await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由（聊天→MiniMax, 代碼→Claude CLI）")
             elif args.lower() in ("on", "開", "1"):
-                result = self.agent.brain.set_private_mode(True)
-                await self._send(chat_id, f"🔒 Private mode ON\nPersona: {result['persona']}\n所有對話都在本機處理")
+                self.agent.brain.set_private_mode(True)
+                await self._send(chat_id, "🔒 Private mode ON")
             elif args.lower() in ("off", "關", "0"):
-                result = self.agent.brain.set_private_mode(False)
-                await self._send(chat_id, "🔓 Private mode OFF\n恢復自動路由")
+                self.agent.brain.set_private_mode(False)
+                await self._send(chat_id, "🔓 Private mode OFF")
             elif args.lower().startswith("persona "):
-                # Custom persona text
-                custom_prompt = args[8:].strip()
-                result = self.agent.brain.set_private_persona(custom_prompt)
+                custom = args[8:].strip()
+                self.agent.brain.set_private_persona(custom)
                 if not self.agent.brain._private_mode:
                     self.agent.brain.set_private_mode(True)
-                await self._send(chat_id,
-                    f"🔒 Private mode ON\n"
-                    f"Persona: {result.get('name', result.get('persona', '?'))}\n"
-                    f"{'自訂人格已設定' if result['persona']=='custom' else ''}"
-                )
+                await self._send(chat_id, f"🔒 Private mode ON\n自訂人格已設定")
             else:
-                # Try as persona name, then as model name
-                key = args.strip().lower()
-                if key in self.agent.brain.PRIVATE_PERSONAS:
-                    result = self.agent.brain.set_private_mode(True, persona=key)
-                    name = self.agent.brain.PRIVATE_PERSONAS[key]["name"]
-                    await self._send(chat_id, f"🔒 Private mode ON\nPersona: {name}")
-                else:
-                    # Try as model name
-                    result = self.agent.brain.set_private_mode(True, model=args.strip())
-                    await self._send(chat_id, f"🔒 Private mode ON\nModel: {result['model']}")
+                self.agent.brain.set_private_mode(True)
+                await self._send(chat_id, "🔒 Private mode ON")
 
         elif cmd == "/ollama":
             if not args:

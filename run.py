@@ -57,18 +57,18 @@ class CodeChangeHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.src_path.endswith(".py"):
             return
+        rel = os.path.relpath(event.src_path, PROJECT_DIR)
+        # Skip data/ and __pycache__
+        if rel.startswith("data/") or "__pycache__" in rel:
+            return
         now = time.time()
         with self._lock:
             # Debounce: ignore events within 1 second
             if now - self._last_event < 1.0:
                 return
             self._last_event = now
-        rel = os.path.relpath(event.src_path, PROJECT_DIR)
-        # Skip data/ and __pycache__
-        if rel.startswith("data/") or "__pycache__" in rel:
-            return
+            self._changed = True
         logger.info("File changed: %s -> scheduling reload", rel)
-        self.changed = True
 
 
 def start_agent() -> subprocess.Popen:
@@ -138,24 +138,20 @@ def main():
                 stable_since = time.time()
                 continue
 
-            # Check if process crashed
-            retcode = proc_holder[0].poll()
-            if retcode is not None:
-                if retcode == 0:
-                    logger.info("NAOMI exited cleanly (code 0). Shutting down.")
-                    break
+            # Check if process has exited (crash or normal exit)
+            ret = proc_holder[0].poll()
+            if ret is not None:
+                elapsed = time.time() - stable_since
+                if elapsed > STABLE_THRESHOLD:
+                    # Process ran long enough — reset backoff
+                    backoff = MIN_BACKOFF
+                    consecutive_crashes = 0
 
                 consecutive_crashes += 1
-                elapsed = time.time() - stable_since
-
-                # Reset backoff if process was stable long enough
-                if elapsed > STABLE_THRESHOLD:
-                    backoff = MIN_BACKOFF
-                    consecutive_crashes = 1
-
                 logger.warning(
-                    "NAOMI crashed (code %d). Crash #%d — restarting in %ds...",
-                    retcode,
+                    "NAOMI exited with code %d (crash #%d). "
+                    "Restarting in %ds...",
+                    ret,
                     consecutive_crashes,
                     backoff,
                 )
@@ -163,15 +159,16 @@ def main():
                 backoff = min(backoff * 2, MAX_BACKOFF)
                 proc_holder[0] = start_agent()
                 stable_since = time.time()
-                continue
 
             time.sleep(0.5)
-    finally:
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Launcher encountered an unexpected error")
+        _terminate_process(proc_holder[0])
         observer.stop()
         observer.join()
-        # Ensure child process is cleaned up
-        if proc_holder[0].poll() is None:
-            _terminate_process(proc_holder[0])
+        sys.exit(1)
 
 
 if __name__ == "__main__":

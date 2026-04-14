@@ -43,6 +43,8 @@ from core.discovery import CapabilityDiscovery
 from core.skills import SkillManager
 from core.scheduler import Scheduler
 from core.project import ProjectPipeline
+from core.session import SessionManager
+from core.persona_drift import PersonaDrift
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -148,6 +150,8 @@ class NAOMIAgent:
         self.skills = SkillManager(brain=self.brain)
         self.scheduler = Scheduler()
         self.project = ProjectPipeline(self.brain, self.actions, discovery=self.discovery)
+        self.session_manager = SessionManager(self.memory)
+        self.persona_drift = PersonaDrift(self.brain, self.memory)
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

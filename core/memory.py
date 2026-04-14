@@ -101,6 +101,29 @@ class Memory:
             message_count INTEGER DEFAULT 0,
             created_at REAL NOT NULL
         )''')
+        # v3: Feedback signals (reactions, implicit)
+        c.execute('''CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER,
+            signal TEXT NOT NULL,
+            source TEXT NOT NULL,
+            weight REAL DEFAULT 1.0,
+            created_at REAL NOT NULL
+        )''')
+        # v3: Persona drift history
+        c.execute('''CREATE TABLE IF NOT EXISTS persona_drift (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            persona TEXT NOT NULL DEFAULT 'naomi',
+            version INTEGER NOT NULL,
+            style_overrides TEXT NOT NULL,
+            trigger_reason TEXT,
+            created_at REAL NOT NULL
+        )''')
+        # Migrate: add session_id column if missing
+        try:
+            c.execute("SELECT session_id FROM conversations LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE conversations ADD COLUMN session_id TEXT DEFAULT 'default'")
         self.conn.commit()
 
     # === Short-term Memory ===
@@ -311,30 +334,132 @@ class Memory:
     # === Conversation Log ===
     MAX_CONVERSATIONS = 500
 
-    def log_conversation(self, role: str, content: str, persona: str = "naomi"):
+    def log_conversation(self, role: str, content: str, persona: str = "naomi",
+                         session_id: str = "default"):
         self.conn.execute(
-            "INSERT INTO conversations (role, content, timestamp, persona) VALUES (?, ?, ?, ?)",
-            (role, content, time.time(), persona)
+            "INSERT INTO conversations (role, content, timestamp, persona, session_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (role, content, time.time(), persona, session_id),
         )
         self.conn.execute(
             "DELETE FROM conversations WHERE id NOT IN "
             "(SELECT id FROM conversations ORDER BY timestamp DESC LIMIT ?)",
-            (self.MAX_CONVERSATIONS,)
+            (self.MAX_CONVERSATIONS,),
         )
         self.conn.commit()
 
-    def get_conversations(self, limit: int = 50, persona: str = None) -> List[Dict]:
-        """Get conversations, optionally filtered by persona."""
+    def get_conversations(self, limit: int = 50, persona: str = None,
+                          session_id: str = None) -> List[Dict]:
+        """Get conversations, optionally filtered by persona and/or session."""
+        clauses: List[str] = []
+        params: list = []
         if persona:
-            rows = self.conn.execute(
-                "SELECT * FROM conversations WHERE persona=? ORDER BY timestamp DESC LIMIT ?",
-                (persona, limit)
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM conversations ORDER BY timestamp DESC LIMIT ?", (limit,)
-            ).fetchall()
+            clauses.append("persona=?")
+            params.append(persona)
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(session_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM conversations{where} ORDER BY timestamp DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    def get_last_conversation(self, persona: str = None) -> Optional[Dict]:
+        """Return the most recent conversation entry for a persona."""
+        if persona:
+            row = self.conn.execute(
+                "SELECT * FROM conversations WHERE persona=? ORDER BY timestamp DESC LIMIT 1",
+                (persona,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM conversations ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_conversation_count_since(self, since: float, persona: str = "naomi") -> int:
+        """Count conversations since a given timestamp."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM conversations WHERE persona=? AND timestamp>?",
+            (persona, since),
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def list_sessions(self, persona: str = "naomi", limit: int = 10) -> List[Dict]:
+        """List distinct sessions with first-message preview."""
+        rows = self.conn.execute(
+            "SELECT session_id, MIN(timestamp) as started, MAX(timestamp) as last_active, "
+            "COUNT(*) as msg_count "
+            "FROM conversations WHERE persona=? AND session_id != 'default' "
+            "GROUP BY session_id ORDER BY last_active DESC LIMIT ?",
+            (persona, limit),
+        ).fetchall()
+        sessions = []
+        for r in rows:
+            preview_row = self.conn.execute(
+                "SELECT content FROM conversations WHERE session_id=? AND role='user' "
+                "ORDER BY timestamp ASC LIMIT 1",
+                (r["session_id"],),
+            ).fetchone()
+            sessions.append({
+                "session_id": r["session_id"],
+                "started": r["started"],
+                "last_active": r["last_active"],
+                "msg_count": r["msg_count"],
+                "preview": preview_row["content"][:80] if preview_row else "",
+            })
+        return sessions
+
+    # === Feedback ===
+    def log_feedback(self, signal: str, source: str, weight: float = 1.0,
+                     conversation_id: int = None):
+        self.conn.execute(
+            "INSERT INTO feedback (conversation_id, signal, source, weight, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, signal, source, weight, time.time()),
+        )
+        self.conn.commit()
+
+    def get_feedback_summary(self, limit: int = 50) -> Dict[str, Any]:
+        """Summarize recent feedback signals."""
+        rows = self.conn.execute(
+            "SELECT signal, weight FROM feedback ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return {"total": 0, "positive": 0, "negative": 0, "neutral": 0, "score": 0.5}
+        pos = sum(r["weight"] for r in rows if r["signal"] == "positive")
+        neg = sum(r["weight"] for r in rows if r["signal"] == "negative")
+        neu = sum(r["weight"] for r in rows if r["signal"] == "neutral")
+        total = pos + neg + neu
+        score = (pos / total) if total > 0 else 0.5
+        return {"total": len(rows), "positive": pos, "negative": neg, "neutral": neu, "score": round(score, 2)}
+
+    # === Persona Drift ===
+    def save_drift(self, persona: str, version: int, style_overrides: str,
+                   trigger_reason: str = ""):
+        self.conn.execute(
+            "INSERT INTO persona_drift (persona, version, style_overrides, trigger_reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (persona, version, style_overrides, trigger_reason, time.time()),
+        )
+        self.conn.commit()
+
+    def get_latest_drift(self, persona: str = "naomi") -> Optional[Dict]:
+        row = self.conn.execute(
+            "SELECT * FROM persona_drift WHERE persona=? ORDER BY version DESC LIMIT 1",
+            (persona,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_drift_history(self, persona: str = "naomi", limit: int = 5) -> List[Dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM persona_drift WHERE persona=? ORDER BY version DESC LIMIT ?",
+            (persona, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # === v2: Progressive Context Compression ===
     def compress_context(self, brain=None) -> str:

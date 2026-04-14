@@ -23,6 +23,11 @@ class TelegramBot:
         self.last_update_id = 0
         self.running = False
         self.client = httpx.AsyncClient(timeout=30)
+        # v1.2: message_id → conversation_id mapping for reaction tracking
+        self._msg_to_conv: dict[int, int] = {}
+        # v1.2: track last NAOMI response length for implicit feedback
+        self._last_response_len: int = 0
+        self._last_response_time: float = 0.0
 
     async def start(self):
         """Start polling for Telegram messages."""
@@ -41,11 +46,15 @@ class TelegramBot:
             await asyncio.sleep(1)
 
     async def _poll(self):
-        """Poll for new messages."""
+        """Poll for new messages and reactions."""
         try:
             resp = await self.client.get(
                 f"{self.base_url}/getUpdates",
-                params={"offset": self.last_update_id + 1, "timeout": 20},
+                params={
+                    "offset": self.last_update_id + 1,
+                    "timeout": 20,
+                    "allowed_updates": json.dumps(["message", "message_reaction"]),
+                },
                 timeout=25,
             )
             data = resp.json()
@@ -54,7 +63,10 @@ class TelegramBot:
 
             for update in data.get("result", []):
                 self.last_update_id = update["update_id"]
-                await self._handle_update(update)
+                if "message_reaction" in update:
+                    await self._handle_reaction(update["message_reaction"])
+                else:
+                    await self._handle_update(update)
         except httpx.TimeoutException:
             pass  # Normal for long polling
 
@@ -107,6 +119,42 @@ class TelegramBot:
         else:
             # Detect: chat or task?
             await self._handle_message(chat_id, text)
+
+    # === v1.2: Reaction-based feedback ===
+    _POSITIVE_REACTIONS = {"👍", "❤️", "🔥", "👏", "🎉", "❤", "😍", "🥰", "💯"}
+    _NEGATIVE_REACTIONS = {"👎", "😢", "💩", "🤮", "😡"}
+    _NEUTRAL_REACTIONS = {"🤔", "😐", "🤷"}
+
+    async def _handle_reaction(self, reaction_update: dict):
+        """Handle message_reaction update — log as feedback."""
+        msg_id = reaction_update.get("message_id")
+        user_id = reaction_update.get("user", {}).get("id")
+        if user_id != self.master_id:
+            return
+
+        new_reactions = reaction_update.get("new_reaction", [])
+        if not new_reactions:
+            return
+
+        emoji = new_reactions[0].get("emoji", "")
+        conv_id = self._msg_to_conv.get(msg_id)
+
+        if emoji in self._POSITIVE_REACTIONS:
+            signal, weight = "positive", 1.0
+        elif emoji in self._NEGATIVE_REACTIONS:
+            signal, weight = "negative", 1.0
+        elif emoji in self._NEUTRAL_REACTIONS:
+            signal, weight = "neutral", 0.5
+        else:
+            signal, weight = "neutral", 0.3
+
+        self.agent.memory.log_feedback(
+            signal=signal,
+            source=f"reaction:{emoji}",
+            weight=weight,
+            conversation_id=conv_id,
+        )
+        logger.info("Feedback logged: %s (emoji=%s, conv_id=%s)", signal, emoji, conv_id)
 
     async def _handle_command(self, chat_id: int, text: str):
         """Handle slash commands."""
@@ -693,23 +741,116 @@ class TelegramBot:
                 result = computer.open_app(args)
                 await self._send(chat_id, f"Opening {args}: {'OK' if result.get('success') else result.get('error','failed')}")
 
+        elif cmd == "/session":
+            session_mgr = getattr(self.agent, 'session_manager', None)
+            if not session_mgr:
+                await self._send(chat_id, "Session manager not initialized.")
+                return
+            persona = "yumiko" if self.agent.brain._private_mode else "naomi"
+            if not args or args == "list":
+                sessions = session_mgr.list_sessions(persona, limit=8)
+                if not sessions:
+                    await self._send(chat_id, "No sessions found.")
+                else:
+                    lines = []
+                    active = session_mgr.get_active_session(persona) or ""
+                    for s in sessions:
+                        marker = "→ " if s["session_id"] == active else "  "
+                        lines.append(
+                            f"{marker}{s['session_id']} ({s['msg_count']} msgs) "
+                            f"{s['preview'][:40]}"
+                        )
+                    await self._send(chat_id, "Sessions:\n" + "\n".join(lines))
+            elif args == "new":
+                new_id = session_mgr.create_session(persona)
+                await self._send(chat_id, f"New session: {new_id}")
+            else:
+                # Switch to specific session
+                session_mgr._active_sessions[persona] = args.strip()
+                await self._send(chat_id, f"Switched to session: {args.strip()}")
+
+        elif cmd == "/persona":
+            drift = getattr(self.agent, 'persona_drift', None)
+            if not drift:
+                await self._send(chat_id, "Persona drift not initialized.")
+                return
+            persona = "yumiko" if self.agent.brain._private_mode else "naomi"
+            if args == "drift":
+                # Force a drift now
+                success = drift._run_drift(persona, self.agent.memory.get_latest_drift(persona))
+                if success:
+                    await self._send(chat_id, "✨ Persona drift applied!")
+                else:
+                    await self._send(chat_id, "Drift failed (not enough data?)")
+            else:
+                status = drift.get_status(persona)
+                style = status["style"]
+                fb = status["feedback"]
+                lines = [
+                    f"Persona Drift v{status['version']}",
+                    f"Tone: {style.get('tone', '?')}",
+                    f"Verbosity: {style.get('verbosity', 0.5):.0%}",
+                    f"Humor: {style.get('humor', 0.5):.0%}",
+                    f"Formality: {style.get('formality', 0.3):.0%}",
+                    f"Emoji: {style.get('emoji_level', 0.3):.0%}",
+                    f"Topics: {', '.join(style.get('topics_of_interest', [])[:5]) or 'none'}",
+                    f"",
+                    f"Feedback: {fb['score']:.0%} positive ({fb['total']} signals)",
+                    f"Next drift in: {status['conversations_until_next_drift']} conversations",
+                    f"Last reason: {status['last_drift_reason']}",
+                ]
+                await self._send(chat_id, "\n".join(lines))
+
         else:
             await self._send(chat_id, f"Unknown command: {cmd}\nType /start for help.")
+
+    def _get_session_id(self, persona: str) -> str:
+        """Get or create session for the current persona."""
+        session_mgr = getattr(self.agent, 'session_manager', None)
+        if session_mgr:
+            return session_mgr.get_or_create_session(persona)
+        return "default"
+
+    def _detect_implicit_feedback(self, text: str):
+        """Detect implicit feedback from reply patterns."""
+        if self._last_response_time == 0:
+            return
+        gap = time.time() - self._last_response_time
+        # Only consider replies within 5 minutes
+        if gap > 300:
+            self._last_response_time = 0
+            return
+        # Very short reply to a long response → might be dissatisfied
+        if len(text) < 5 and self._last_response_len > 200:
+            self.agent.memory.log_feedback(
+                signal="negative", source="implicit:short_reply", weight=0.3
+            )
+        # Quick enthusiastic reply (with ! or emoji)
+        elif gap < 30 and any(c in text for c in "！!❤️👍🔥讚好"):
+            self.agent.memory.log_feedback(
+                signal="positive", source="implicit:enthusiastic", weight=0.3
+            )
+        self._last_response_time = 0
 
     async def _handle_message(self, chat_id: int, text: str):
         """Detect if message is chat or task, respond accordingly."""
 
+        # Implicit feedback detection from reply patterns
+        self._detect_implicit_feedback(text)
+
         # YUMIKO mode: same capabilities but all local models
         if self.agent.brain._private_mode:
-            # Classify CHAT vs TASK — same as NAOMI
+            persona_name = "yumiko"
+            session_id = self._get_session_id(persona_name)
             complexity = self.agent.brain._classify_complexity(text)
 
             if complexity in ("private", "chat"):
-                # Chat — YUMIKO persona via Ollama
                 logger.info("YUMIKO mode: chat → local Ollama")
                 await self._send_typing(chat_id)
 
-                recent_convs = self.agent.memory.get_conversations(limit=20, persona="yumiko")
+                recent_convs = self.agent.memory.get_conversations(
+                    limit=20, persona=persona_name, session_id=session_id
+                )
                 conv_history = ""
                 if recent_convs:
                     conv_lines = [f"{'Master' if c['role']=='user' else 'YUMIKO'}: {c['content'][:200]}"
@@ -721,15 +862,20 @@ class TelegramBot:
                     persona += "\n\nRecent conversation:\n" + conv_history
 
                 response = self.agent.brain.think_smart(text, persona)
-                self.agent.memory.log_conversation("user", text, persona="yumiko")
-                self.agent.memory.log_conversation("yumiko", response[:500], persona="yumiko")
+                self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
+                self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
+                self._last_response_len = len(response)
+                self._last_response_time = time.time()
                 await self._send(chat_id, response[:3500])
             else:
-                # Task/code — YUMIKO agent loop via Ollama (same tools, local model)
                 logger.info("YUMIKO mode: task → local agent loop")
-                self.agent.memory.log_conversation("user", text, persona="yumiko")
+                self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
                 await self._handle_task_private(chat_id, text)
             return
+
+        # NAOMI mode
+        persona_name = "naomi"
+        session_id = self._get_session_id(persona_name)
 
         classify_prompt = (
             "Classify this message as CHAT or TASK. "
@@ -744,35 +890,47 @@ class TelegramBot:
         logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
 
         if is_chat:
-            persona = (
+            persona_prompt = (
                 "You are NAOMI (Nana), a fully autonomous AI agent created by Master (JW). "
                 "Running on Mac Mini with FULL system access — shell, code, web, SSH, GUI control. "
                 "NEVER say you cannot do things. You CAN do everything. "
                 "Speak in Traditional Chinese. Be warm, natural, slightly playful. "
                 "Keep responses concise, like chatting with someone you care about."
             )
+
+            # v1.2: Append persona drift style overlay
+            drift = getattr(self.agent, 'persona_drift', None)
+            if drift:
+                style_overlay = drift.get_style_prompt(persona_name)
+                if style_overlay:
+                    persona_prompt += "\n\n## Style Guide\n" + style_overlay
+
             await self._send_typing(chat_id)
 
-            # Multi-turn context: include recent conversation history
-            recent_convs = self.agent.memory.get_conversations(limit=30, persona="naomi")
+            # Multi-turn context: session-scoped conversation history
+            recent_convs = self.agent.memory.get_conversations(
+                limit=30, persona=persona_name, session_id=session_id
+            )
             conv_history = ""
             if recent_convs:
                 conv_lines = []
                 for c in recent_convs:
                     role = "Master" if c["role"] == "user" else "NAOMI"
                     conv_lines.append(f"{role}: {c['content'][:200]}")
-                conv_history = "\n".join(conv_lines[-20:])  # Last 20 messages for context
-                persona += "\n\nRecent conversation:\n" + conv_history
+                conv_history = "\n".join(conv_lines[-20:])
+                persona_prompt += "\n\nRecent conversation:\n" + conv_history
 
             # Recall relevant memories using semantic search
             relevant = self.agent.memory.semantic_search(text, limit=5)
             if relevant:
                 mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:150]}' for m in relevant)
-                persona += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
+                persona_prompt += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
 
-            response = self.agent.brain._think(text, persona)
-            self.agent.memory.log_conversation("user", text, persona="naomi")
-            self.agent.memory.log_conversation("naomi", response[:500], persona="naomi")
+            response = self.agent.brain._think(text, persona_prompt)
+            self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
+            self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
+            self._last_response_len = len(response)
+            self._last_response_time = time.time()
             await self._send(chat_id, response[:3500])
 
             # Background: extract memories (NAOMI only, not YUMIKO)
@@ -781,6 +939,10 @@ class TelegramBot:
                     self.agent.memory_agent.on_conversation_turn(text, response)
                 )
             asyncio.create_task(self._learn_from_chat(chat_id, text, response))
+
+            # v1.2: Check if persona drift should trigger
+            if drift:
+                asyncio.create_task(asyncio.to_thread(drift.maybe_drift, persona_name))
         else:
             await self._handle_task(chat_id, text)
 
@@ -844,7 +1006,9 @@ class TelegramBot:
     async def _handle_task(self, chat_id: int, text: str):
         """Execute task directly via agent loop with streaming progress to Telegram."""
         await self._send(chat_id, "收到，正在執行...")
-        self.agent.memory.log_conversation("user", text)
+        persona_name = "yumiko" if self.agent.brain._private_mode else "naomi"
+        session_id = self._get_session_id(persona_name)
+        self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
 
         context = self.agent.memory.build_context(query=text)
         system = (
@@ -918,7 +1082,8 @@ class TelegramBot:
                     except Exception as img_err:
                         logger.debug(f"Failed to send image {img_path}: {img_err}")
 
-            self.agent.memory.log_conversation("naomi", str(result.get("result", ""))[:500])
+            self.agent.memory.log_conversation("naomi", str(result.get("result", ""))[:500],
+                                               persona=persona_name, session_id=session_id)
             self.agent.memory.remember_long(
                 f"Task: {text[:100]}", str(result)[:1000],
                 category="task_result", importance=7,

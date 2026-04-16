@@ -19,6 +19,7 @@ class ActionExecutor:
         self.memory = memory
         self.project_dir = project_dir
         self._computer = None  # Lazy init
+        self._sandbox = None   # Lazy init Docker sandbox
 
         self.actions = {
             "shell": self.execute_shell,
@@ -112,9 +113,29 @@ class ActionExecutor:
             )
             return {"error": error_msg, "success": False}
 
+    def _get_sandbox(self):
+        """Lazy-init DockerSandbox."""
+        if self._sandbox is None:
+            from core.sandbox import DockerSandbox
+            self._sandbox = DockerSandbox(project_dir=self.project_dir)
+        return self._sandbox
+
     def execute_shell(self, command: str) -> Dict[str, Any]:
-        """Execute a shell command."""
+        """Execute a shell command. Routes sensitive commands through Docker sandbox if available."""
+        from core.security import check_sensitive_command
+
         logger.info(f"Shell: {command[:200]}")
+
+        # Check if command is sensitive and sandbox is available
+        sensitive = check_sensitive_command(command)
+        if sensitive:
+            sandbox = self._get_sandbox()
+            if sandbox.is_available():
+                logger.info("Routing sensitive command through Docker sandbox: %s", sensitive.get("description", ""))
+                return sandbox.execute(command, mount_dir=self.project_dir)
+            else:
+                logger.warning("Sensitive command but Docker not available, executing directly: %s", command[:100])
+
         try:
             result = subprocess.run(
                 ["bash", "-lc", command],
@@ -144,7 +165,7 @@ class ActionExecutor:
         full_path = path if os.path.isabs(path) else os.path.join(self.project_dir, path)
         if not os.path.exists(full_path):
             return {"error": f"File not found: {full_path}", "success": False}
-        with open(full_path, 'r') as f:
+        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         return {"success": True, "content": content, "path": full_path}
 
@@ -156,7 +177,7 @@ class ActionExecutor:
         path, content = parts
         full_path = path.strip() if os.path.isabs(path.strip()) else os.path.join(self.project_dir, path.strip())
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, 'w') as f:
+        with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
         return {"success": True, "path": full_path, "size": len(content)}
 
@@ -192,7 +213,7 @@ class ActionExecutor:
         """Search the web using DuckDuckGo with content sanitization."""
         from core.security import sanitize_external_content
         try:
-            from ddgs import DDGS
+            from duckduckgo_search import DDGS
             results = list(DDGS().text(query, max_results=5))
             # Sanitize search result content
             for r in results:
@@ -207,10 +228,10 @@ class ActionExecutor:
                 "query": query,
             }
         except ImportError:
-            install_result = self.pip_install("ddgs")
+            install_result = self.pip_install("duckduckgo-search")
             if install_result.get("success"):
                 try:
-                    from ddgs import DDGS
+                    from duckduckgo_search import DDGS
                     results = list(DDGS().text(query, max_results=5))
                     return {"success": bool(results), "results": results, "query": query,
                             "error": "" if results else "No results"}

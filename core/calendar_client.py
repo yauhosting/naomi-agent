@@ -84,7 +84,7 @@ class CalendarClient:
                 flow = InstalledAppFlow.from_client_secrets_file(
                     str(cred_path), SCOPES
                 )
-                creds = flow.run_local_server(port=18811)
+                creds = flow.run_local_server(port=8080)
 
             TOKEN_PATH.write_text(creds.to_json())
 

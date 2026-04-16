@@ -258,7 +258,10 @@ class Brain:
         "ollama-dolphin":  ("ollama",       "dolphin-llama3:8b",          "Ollama Dolphin Llama3 8B (local, fast)"),
         "ollama-coder":   ("ollama",        "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest", "OmniCoder 9B uncensored (private coding)"),
         "minimax":        ("minimax",       "MiniMax-M2.7",               "MiniMax M2.7 (fallback)"),
-        "auto":           ("auto",          None,                         "Auto: CLI → Ollama → GLM → MiniMax"),
+        "openai":         ("openai",        "gpt-5.4",                    "OpenAI GPT-5.4 (Codex-class)"),
+        "openai-mini":    ("openai",        "gpt-4.1-mini",               "OpenAI GPT-4.1 Mini (fast, cheap)"),
+        "openai-o3":      ("openai",        "o3",                         "OpenAI o3 (reasoning)"),
+        "auto":           ("auto",          None,                         "Auto: CLI → Ollama → GLM → OpenAI → MiniMax"),
     }
 
     def __init__(self, config: dict):
@@ -267,12 +270,16 @@ class Brain:
         self.fallback = config.get("fallback", {})
         self._claude_available = None
         self._claude_cli_path = None
+        self._codex_cli_path = self._find_codex_cli()
         self._active_mode = "auto"
         self._anthropic_client = None
 
+        # Optional memory reference for metric logging
+        self._memory = None
+
         # Error failover tracking
-        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0}
-        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0}
+        self._consecutive_failures = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0, "openai": 0}
+        self._backoff_until = {"cli": 0, "proxy": 0, "minimax": 0, "api": 0, "glm": 0, "ollama": 0, "openai": 0}
         self._max_failures_before_backoff = 3
         self._backoff_seconds = 60  # Skip a failed backend for 60s
 
@@ -288,6 +295,7 @@ class Brain:
         self._anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         self._glm_key = os.environ.get("GLM_API_KEY", "")
         self._glm_base_url = "https://api.z.ai/api/paas/v4"
+        self._openai_key = os.environ.get("OPENAI_API_KEY", "")
 
         if self._anthropic_key:
             logger.info("Anthropic API key loaded — native tool_use enabled")
@@ -299,6 +307,12 @@ class Brain:
 
         if self._minimax_key:
             logger.info("MiniMax API key loaded")
+
+        if self._openai_key:
+            logger.info("OpenAI API key loaded — GPT-5.4 available")
+
+        if self._codex_cli_path:
+            logger.info("Codex CLI found at: %s — GPT-5.4 via ChatGPT subscription", self._codex_cli_path)
 
     def _get_anthropic_client(self):
         """Lazy-init Anthropic client."""
@@ -618,7 +632,28 @@ class Brain:
                 continue
 
             tool_name = call.get("tool", "")
-            tool_input = call.get("input", {})
+            raw_input = call.get("input", {})
+
+            # Normalise tool_input: local models sometimes return a plain
+            # string instead of the expected dict (e.g. {"tool": "web_search",
+            # "input": "query text"} instead of {"tool": "web_search",
+            # "input": {"query": "query text"}}).
+            if isinstance(raw_input, str):
+                # Map the string to the first required field of the tool
+                _field_map = {
+                    "shell": "command", "python_exec": "code",
+                    "file_read": "path", "web_search": "query",
+                    "open_app": "app_name", "type_text": "text",
+                    "key_press": "key", "pip_install": "package",
+                    "git": "command", "web_fetch": "url",
+                    "generate_image": "prompt", "task_complete": "summary",
+                }
+                key = _field_map.get(tool_name, "command")
+                tool_input = {key: raw_input}
+            elif not isinstance(raw_input, dict):
+                tool_input = {}
+            else:
+                tool_input = raw_input
 
             if tool_name == "task_complete":
                 steps.append({"step": iteration, "tool": "task_complete",
@@ -725,6 +760,18 @@ class Brain:
 
     async def _execute_tool(self, executor, tool_name: str, tool_input: dict) -> Dict[str, Any]:
         """Execute a tool call from the agent loop."""
+        # Safety: if tool_input is still somehow a string, wrap it
+        if isinstance(tool_input, str):
+            _fallback_keys = {
+                "shell": "command", "python_exec": "code",
+                "file_read": "path", "web_search": "query",
+                "open_app": "app_name", "type_text": "text",
+                "key_press": "key", "pip_install": "package",
+                "git": "command", "web_fetch": "url",
+                "generate_image": "prompt",
+            }
+            key = _fallback_keys.get(tool_name, "command")
+            tool_input = {key: tool_input}
         try:
             if tool_name == "shell":
                 return await executor.execute("shell", tool_input["command"])
@@ -771,6 +818,24 @@ class Brain:
             return {"success": False, "error": str(e)}
 
     # === Legacy methods (kept for backward compatibility) ===
+
+    @staticmethod
+    def _find_codex_cli() -> Optional[str]:
+        """Find Codex CLI binary path."""
+        for path in [
+            "/opt/homebrew/bin/codex",
+            os.path.expanduser("~/.nvm/versions/node/v22.22.2/bin/codex"),
+            "/usr/local/bin/codex",
+        ]:
+            if os.path.exists(path):
+                return path
+        try:
+            result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
 
     def _check_claude_cli(self) -> bool:
         if self._claude_available is not None:
@@ -919,6 +984,94 @@ class Brain:
             self._record_failure("glm")
             return None
 
+    def _call_openai(self, prompt: str, system_prompt: str = "",
+                     model: str = None) -> str:
+        """Call OpenAI via Codex CLI (uses ChatGPT subscription, no API key needed).
+
+        Falls back to OpenAI API if OPENAI_API_KEY is set and Codex CLI is unavailable.
+        """
+        model = model or self.MODEL_REGISTRY.get(self._active_mode, ("", "gpt-5.4", ""))[1]
+        if not model or not any(model.startswith(p) for p in ("gpt", "o3", "o4")):
+            model = "gpt-5.4"
+
+        # Combine system prompt and user prompt for CLI
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"[System: {system_prompt}]\n\n{prompt}"
+
+        # Try 1: Codex CLI (uses ChatGPT subscription)
+        if self._codex_cli_path:
+            try:
+                result = subprocess.run(
+                    [self._codex_cli_path, "exec",
+                     "-c", f'model="{model}"',
+                     full_prompt],
+                    capture_output=True, text=True, timeout=120,
+                    cwd=os.path.dirname(os.path.dirname(__file__)),
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    # Codex CLI outputs metadata + response, extract the last line(s)
+                    lines = result.stdout.strip().split("\n")
+                    # Find content after the last "codex" or "tokens used" marker
+                    content_lines = []
+                    capture = False
+                    for line in lines:
+                        if line.strip() == "codex":
+                            capture = True
+                            content_lines = []
+                            continue
+                        if "tokens used" in line.lower():
+                            break
+                        if capture:
+                            content_lines.append(line)
+
+                    response = "\n".join(content_lines).strip()
+                    if response:
+                        self._record_success("openai")
+                        return response
+
+                    # Fallback: just return last non-empty line
+                    response = lines[-1].strip()
+                    if response and not response.startswith("tokens"):
+                        self._record_success("openai")
+                        return response
+
+                logger.warning("Codex CLI returned no useful output")
+            except subprocess.TimeoutExpired:
+                logger.warning("Codex CLI timed out (120s)")
+            except Exception as e:
+                logger.warning("Codex CLI failed: %s", e)
+
+        # Try 2: OpenAI API (if API key is available)
+        if self._openai_key:
+            import httpx
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            try:
+                resp = httpx.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self._openai_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"model": model, "messages": messages, "max_tokens": 4096},
+                    timeout=120,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    self._record_success("openai")
+                    return content
+                else:
+                    logger.warning("OpenAI API error %d: %s", resp.status_code, resp.text[:200])
+            except Exception as e:
+                logger.error("OpenAI API failed: %s", e)
+
+        self._record_failure("openai")
+        return None
+
     def _call_claude_proxy(self, prompt: str, system_prompt: str = "") -> str:
         import httpx
         proxy_url = self.primary.get("proxy_url", "http://127.0.0.1:18790/v1/chat/completions")
@@ -1005,6 +1158,9 @@ class Brain:
             "dolphin": "ollama-dolphin", "llama": "ollama-dolphin",
             "glm-local": "ollama-glm", "glm4.7": "ollama-glm",
             "coder": "ollama-coder", "omnicoder": "ollama-coder",
+            "gpt": "openai", "gpt5": "openai", "gpt-5.4": "openai", "codex": "openai",
+            "gpt4": "openai-mini", "gpt-4.1": "openai-mini", "gpt-mini": "openai-mini",
+            "o3": "openai-o3",
         }
         name = aliases.get(name, name)
 
@@ -1028,6 +1184,8 @@ class Brain:
                     return {"success": False, "error": "Ollama not running"}
             except Exception:
                 return {"success": False, "error": "Ollama not reachable at localhost:11434"}
+        if backend == "openai" and not self._openai_key and not self._codex_cli_path:
+            return {"success": False, "error": "No Codex CLI or OPENAI_API_KEY — run 'codex login' first"}
         if backend == "minimax" and not self._minimax_key:
             return {"success": False, "error": "No MINIMAX_API_KEY configured"}
 
@@ -1077,13 +1235,26 @@ class Brain:
             self._consecutive_failures[backend] = 0
         return True
 
-    def _record_success(self, backend: str):
+    def set_memory(self, memory) -> None:
+        """Attach memory for metric logging."""
+        self._memory = memory
+
+    def _record_success(self, backend: str, latency_ms: int = 0,
+                        tokens_in: int = 0, tokens_out: int = 0):
         """Record a successful call."""
         self._consecutive_failures[backend] = 0
         self._usage["total_calls"] += 1
         self._usage["by_backend"][backend] = self._usage["by_backend"].get(backend, 0) + 1
+        if self._memory is not None:
+            try:
+                self._memory.log_metric(
+                    backend=backend, tokens_in=tokens_in, tokens_out=tokens_out,
+                    latency_ms=latency_ms, success=True,
+                )
+            except Exception:
+                pass
 
-    def _record_failure(self, backend: str):
+    def _record_failure(self, backend: str, latency_ms: int = 0, error: str = ""):
         """Record a failed call with backoff."""
         self._consecutive_failures[backend] = self._consecutive_failures.get(backend, 0) + 1
         self._usage["errors"] += 1
@@ -1091,6 +1262,14 @@ class Brain:
             self._backoff_until[backend] = time.time() + self._backoff_seconds
             logger.warning(f"Backend {backend}: {self._consecutive_failures[backend]} consecutive failures, "
                            f"backing off for {self._backoff_seconds}s")
+        if self._memory is not None:
+            try:
+                self._memory.log_metric(
+                    backend=backend, latency_ms=latency_ms,
+                    success=False, error=error[:500],
+                )
+            except Exception:
+                pass
 
     def _think(self, prompt: str, system_prompt: str = "") -> str:
         """Text response with automatic failover and backoff."""
@@ -1123,7 +1302,9 @@ class Brain:
             self._record_failure("proxy")
 
         # Fallback: Ollama (local, free)
-        if self._active_mode in ("auto", "ollama", "ollama-gemma", "ollama-glm", "ollama-dolphin") and self._is_backend_available("ollama"):
+        if self._active_mode in ("auto", "ollama", "ollama-gemma", "ollama-gemma4b",
+                                  "ollama-gemma31b", "ollama-glm", "ollama-dolphin",
+                                  "ollama-coder") and self._is_backend_available("ollama"):
             result = self._call_ollama(prompt, system_prompt)
             if result:
                 return result
@@ -1132,6 +1313,13 @@ class Brain:
         if self._active_mode in ("auto", "glm", "glm-turbo") and self._is_backend_available("glm"):
             if self._glm_key:
                 result = self._call_glm(prompt, system_prompt)
+                if result:
+                    return result
+
+        # Fallback: OpenAI (GPT-5.4)
+        if self._active_mode in ("auto", "openai", "openai-mini", "openai-o3") and self._is_backend_available("openai"):
+            if self._openai_key:
+                result = self._call_openai(prompt, system_prompt)
                 if result:
                     return result
 
@@ -1145,6 +1333,14 @@ class Brain:
                 self._record_failure("minimax")
 
         return "[Brain offline: No backend available]"
+
+    def _call_fast(self, prompt: str, system_prompt: str = "") -> str:
+        """Quick LLM call for classification/lightweight tasks.
+
+        Alias for _think — restored after self-evolution accidentally
+        removed it, breaking Telegram bot message handling.
+        """
+        return self._think(prompt, system_prompt)
 
     # === Smart Routing ===
 
@@ -1292,6 +1488,84 @@ class Brain:
         # Public code — Claude CLI (strongest)
         return self._think(full, system)
 
+    # === Cross-Model Discussion ===
+
+    def cross_model_discuss(self, topic: str, rounds: int = 3,
+                            lang: str = "繁體中文") -> Dict[str, Any]:
+        """Real cross-model debate: Claude vs GPT-5.4.
+
+        Each model sees the full conversation history and responds to the
+        other's arguments.  Returns the debate log and a synthesised summary.
+        """
+        logger.info("Cross-model discuss: %s (%d rounds)", topic[:80], rounds)
+
+        system_claude = (
+            f"你是 Claude，Anthropic 的 AI。你正在與 GPT-5.4 進行多回合辯論。\n"
+            f"用{lang}回答。每次回應：\n"
+            "1. 先回應對方的論點（同意或反駁）\n"
+            "2. 提出你自己的新論點\n"
+            "3. 保持簡潔（150字以內）"
+        )
+        system_gpt = (
+            f"你是 GPT-5.4，OpenAI 的 AI。你正在與 Claude 進行多回合辯論。\n"
+            f"用{lang}回答。每次回應：\n"
+            "1. 先回應對方的論點（同意或反駁）\n"
+            "2. 提出你自己的新論點\n"
+            "3. 保持簡潔（150字以內）"
+        )
+
+        debate_log: list[dict] = []
+        history = f"辯論主題：{topic}\n\n"
+
+        # Determine which backends to use
+        has_claude = (self._check_claude_cli() or self._anthropic_key
+                      or self._is_backend_available("proxy"))
+        has_openai = bool(self._codex_cli_path or self._openai_key)
+
+        if not has_claude or not has_openai:
+            missing = []
+            if not has_claude:
+                missing.append("Claude (需要 CLI 或 API key)")
+            if not has_openai:
+                missing.append("GPT-5.4 (需要 codex login 或 API key)")
+            return {"error": f"缺少模型：{', '.join(missing)}",
+                    "debate_log": [], "summary": ""}
+
+        for r in range(1, rounds + 1):
+            # --- Claude's turn ---
+            claude_prompt = history + "現在輪到你（Claude）發言："
+            claude_resp = self._think(claude_prompt, system_claude)
+            if not claude_resp or claude_resp.startswith("[Brain"):
+                claude_resp = "(Claude 無回應)"
+            debate_log.append({"round": r, "model": "Claude", "content": claude_resp.strip()})
+            history += f"【Claude 第{r}輪】{claude_resp.strip()}\n\n"
+
+            # --- GPT-5.4's turn ---
+            gpt_prompt = history + "現在輪到你（GPT-5.4）發言："
+            gpt_resp = self._call_openai(gpt_prompt, system_gpt)
+            if not gpt_resp:
+                gpt_resp = "(GPT-5.4 無回應)"
+            debate_log.append({"round": r, "model": "GPT-5.4", "content": gpt_resp.strip()})
+            history += f"【GPT-5.4 第{r}輪】{gpt_resp.strip()}\n\n"
+
+        # --- Synthesis (by Claude as NAOMI) ---
+        synth_prompt = (
+            f"以下是 Claude 與 GPT-5.4 關於「{topic}」的辯論記錄：\n\n"
+            f"{history}\n"
+            f"作為 NAOMI，請用{lang}總結：\n"
+            "1. 雙方共識\n2. 主要分歧\n3. 你（NAOMI）的最終判斷"
+        )
+        summary = self._think(synth_prompt)
+        if not summary or summary.startswith("[Brain"):
+            summary = "（無法生成總結）"
+
+        return {
+            "topic": topic,
+            "rounds": rounds,
+            "debate_log": debate_log,
+            "summary": summary.strip(),
+        }
+
     # === High-level methods ===
 
     def think(self, prompt: str, context: str = "") -> str:
@@ -1304,21 +1578,18 @@ class Brain:
         return self._think(full, system)
 
     def analyze(self, task: str, context: str = "") -> Dict[str, Any]:
+        from core.output_validator import parse_json_response
         system = ("You are NAOMI's analytical brain. Break down tasks into steps. "
                   "Respond in valid JSON only: "
                   '{"understanding":"...","steps":[{"step":1,"action":"...","tool":"...","details":"..."}],'
                   '"tools_needed":[],"estimated_complexity":"low/medium/high","risks":[]}')
         prompt = f"Task: {task}" + (f"\n\nContext:\n{context}" if context else "")
         response = self._think(prompt, system)
-        try:
-            if "```json" in response:
-                response = response.split("```json")[1].split("```")[0]
-            elif "```" in response:
-                response = response.split("```")[1].split("```")[0]
-            return json.loads(response.strip())
-        except (json.JSONDecodeError, IndexError):
-            return {"understanding": task, "steps": [], "tools_needed": [],
-                    "estimated_complexity": "medium", "risks": []}
+        parsed = parse_json_response(response, brain=self, max_retries=1)
+        if parsed is not None:
+            return parsed
+        return {"understanding": task, "steps": [], "tools_needed": [],
+                "estimated_complexity": "medium", "risks": []}
 
     def debug(self, error: str, context: str = "") -> str:
         system = "You are NAOMI's debugger. Analyze errors and provide exact fix commands. Be concise."
@@ -1330,19 +1601,16 @@ class Brain:
         return self._think(spec, system)
 
     def reflect(self, history: str) -> Dict[str, Any]:
+        from core.output_validator import parse_json_response
         system = ('Review recent activity. Respond in valid JSON only: '
                   '{"observations":[],"suggestions":[],"self_improvements":[],'
                   '"proactive_tasks":[],"priority":"low"}')
         response = self._think(f"Review:\n{history}", system)
-        try:
-            if "```json" in response:
-                response = response.split("```json")[1].split("```")[0]
-            elif "```" in response:
-                response = response.split("```")[1].split("```")[0]
-            return json.loads(response.strip())
-        except (json.JSONDecodeError, IndexError):
-            return {"observations": [], "suggestions": [], "self_improvements": [],
-                    "proactive_tasks": [], "priority": "low"}
+        parsed = parse_json_response(response, brain=self, max_retries=1)
+        if parsed is not None:
+            return parsed
+        return {"observations": [], "suggestions": [], "self_improvements": [],
+                "proactive_tasks": [], "priority": "low"}
 
     def generate_ideas(self, topic: str) -> str:
         return self._think(f"Generate creative ideas for: {topic}",
@@ -1353,17 +1621,14 @@ class Brain:
                            "Summarize into key insights. Be concise.")
 
     def strategize(self, goal: str, context: str = "") -> Dict[str, Any]:
+        from core.output_validator import parse_json_response
         system = ('Create a strategy. Respond JSON only: '
                   '{"analysis":"...","strategy":"...","opportunities":[],"risks":[],'
                   '"creative_ideas":[],"next_steps":[]}')
         prompt = f"Goal: {goal}" + (f"\n\nContext:\n{context}" if context else "")
         response = self._think(prompt, system)
-        try:
-            if "```json" in response:
-                response = response.split("```json")[1].split("```")[0]
-            elif "```" in response:
-                response = response.split("```")[1].split("```")[0]
-            return json.loads(response.strip())
-        except (json.JSONDecodeError, IndexError):
-            return {"analysis": goal, "strategy": response[:500],
-                    "opportunities": [], "risks": [], "creative_ideas": [], "next_steps": []}
+        parsed = parse_json_response(response, brain=self, max_retries=1)
+        if parsed is not None:
+            return parsed
+        return {"analysis": goal, "strategy": response[:500],
+                "opportunities": [], "risks": [], "creative_ideas": [], "next_steps": []}

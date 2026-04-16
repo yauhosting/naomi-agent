@@ -35,6 +35,8 @@ class Memory:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._init_tables()
         self._extraction_lock = False  # Interlock: prevent duplicate extractions
 
@@ -127,6 +129,26 @@ class Memory:
             c.execute("SELECT session_id FROM conversations LIMIT 1")
         except sqlite3.OperationalError:
             c.execute("ALTER TABLE conversations ADD COLUMN session_id TEXT DEFAULT 'default'")
+        # v4: Persistent multi-turn tool context (session messages for agent loop)
+        c.execute("""CREATE TABLE IF NOT EXISTS session_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_session_msg ON session_messages(session_id)")
+        # v4: Observability metrics
+        c.execute("""CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            backend TEXT NOT NULL,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            latency_ms INTEGER DEFAULT 0,
+            success INTEGER DEFAULT 1,
+            error TEXT DEFAULT ''
+        )""")
         self.conn.commit()
 
     # === Short-term Memory ===
@@ -613,6 +635,110 @@ class Memory:
             )
         """)
         self.conn.commit()
+
+    # === v4: Session Messages (Persistent Multi-Turn Tool Context) ===
+
+    def save_session_messages(self, session_id: str, messages: list) -> None:
+        """Save agent loop messages for later resumption."""
+        now = time.time()
+        rows = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, default=str)
+            rows.append((session_id, role, content, now))
+        self.conn.executemany(
+            "INSERT INTO session_messages (session_id, role, content, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        self.conn.commit()
+
+    def load_session_messages(self, session_id: str) -> List[Dict]:
+        """Load previous session messages."""
+        rows = self.conn.execute(
+            "SELECT role, content, created_at FROM session_messages "
+            "WHERE session_id=? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            content = r["content"]
+            # Try to deserialize JSON content back to its original form
+            try:
+                content = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            results.append({
+                "role": r["role"],
+                "content": content,
+                "created_at": r["created_at"],
+            })
+        return results
+
+    def clear_session_messages(self, session_id: str) -> None:
+        """Clear a session's messages."""
+        self.conn.execute(
+            "DELETE FROM session_messages WHERE session_id=?",
+            (session_id,),
+        )
+        self.conn.commit()
+
+    # === v4: Observability Metrics ===
+
+    def log_metric(self, backend: str, tokens_in: int = 0, tokens_out: int = 0,
+                   latency_ms: int = 0, success: bool = True, error: str = "") -> None:
+        """Log an API call metric."""
+        self.conn.execute(
+            "INSERT INTO metrics (timestamp, backend, tokens_in, tokens_out, "
+            "latency_ms, success, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), backend, tokens_in, tokens_out, latency_ms,
+             1 if success else 0, error),
+        )
+        self.conn.commit()
+
+    def get_metrics_summary(self, hours: int = 24) -> Dict[str, Any]:
+        """Return aggregated metrics for the last N hours."""
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            "SELECT backend, COUNT(*) as calls, "
+            "SUM(tokens_in) as total_in, SUM(tokens_out) as total_out, "
+            "AVG(latency_ms) as avg_latency, "
+            "SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as successes, "
+            "SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as failures "
+            "FROM metrics WHERE timestamp > ? GROUP BY backend",
+            (since,),
+        ).fetchall()
+
+        total_calls = 0
+        total_success = 0
+        total_latency = 0
+        by_backend: Dict[str, Any] = {}
+        for r in rows:
+            backend = r["backend"]
+            calls = r["calls"]
+            total_calls += calls
+            total_success += r["successes"]
+            total_latency += (r["avg_latency"] or 0) * calls
+            by_backend[backend] = {
+                "calls": calls,
+                "tokens_in": r["total_in"] or 0,
+                "tokens_out": r["total_out"] or 0,
+                "avg_latency_ms": round(r["avg_latency"] or 0),
+                "success_rate": round(r["successes"] / max(calls, 1) * 100, 1),
+            }
+
+        success_rate = round(total_success / max(total_calls, 1) * 100, 1)
+        avg_latency = round(total_latency / max(total_calls, 1))
+
+        return {
+            "hours": hours,
+            "total_calls": total_calls,
+            "success_rate": success_rate,
+            "avg_latency_ms": avg_latency,
+            "by_backend": by_backend,
+        }
 
     def close(self):
         self.conn.close()

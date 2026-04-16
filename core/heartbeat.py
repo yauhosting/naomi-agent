@@ -186,12 +186,27 @@ class Heartbeat:
                     "naomi",
                     f"[UNVERIFIED — no real action taken] {str(result)[:500]}"
                 )
+                # Record error pattern for learning
+                if hasattr(self.agent, 'error_patterns') and self.agent.error_patterns:
+                    self.agent.error_patterns.record_error(
+                        task_type="action",
+                        error_msg=str(validated.get("reason", "")),
+                        context=command[:200],
+                    )
 
         except Exception as e:
             error_msg = f"Failed: {e}\n{traceback.format_exc()}"
             self.agent.memory.complete_task(task_id, error_msg[:2000], status="failed")
             self.agent.memory.log_conversation("naomi", f"Failed: {command}\nError: {e}")
             logger.error(error_msg)
+
+            # Record error pattern for learning
+            if hasattr(self.agent, 'error_patterns') and self.agent.error_patterns:
+                self.agent.error_patterns.record_error(
+                    task_type="action",
+                    error_msg=str(e),
+                    context=command[:200],
+                )
 
             # Auto-resolve: discover and install missing capabilities, then retry once
             if hasattr(self.agent, 'discovery'):
@@ -281,19 +296,41 @@ class Heartbeat:
         """
         logger.info("Handling as ACTION task (native tool_use agent loop)")
 
+        # Check for known resolutions from error pattern DB
+        if hasattr(self.agent, 'error_patterns') and self.agent.error_patterns:
+            resolution = self.agent.error_patterns.find_resolution(command)
+            if resolution:
+                res_text = resolution.get("resolution", "")
+                logger.info("Found known resolution for similar task: %s", res_text[:100])
+                context += f"\n\nKnown fix for similar errors: {res_text}"
+
+        # Use planner for complex multi-step tasks
+        if hasattr(self.agent, 'planner') and self.agent.planner:
+            analysis = self.agent.brain.analyze(command)
+            steps = analysis.get("steps", [])
+            if len(steps) >= 3:  # Complex task — use planner
+                logger.info("Complex task (%d steps) — using planner", len(steps))
+                result = await self.agent.planner.run(
+                    command, self.agent.actions, self.agent.brain, max_steps=15
+                )
+                return result
+
         # Inject relevant skills into context
         skill_context = ""
         if hasattr(self.agent, 'skills'):
             skill_context = self.agent.skills.get_skill_context(command)
 
+        base_system = (
+            "You are NAOMI, an autonomous AI agent on macOS. "
+            f"Context:\n{context[:1500]}\n\n"
+        )
+        if skill_context:
+            base_system += f"{skill_context}\n\n"
         system = (
-            "You are NAOMI, an autonomous AI agent on macOS. "
-            f"Context:\n{context[:1500]}\n\n"
-            f"{skill_context}\n\n" if skill_context else
-            "You are NAOMI, an autonomous AI agent on macOS. "
-            f"Context:\n{context[:1500]}\n\n"
-        ) + "Use tools to complete the task. Do NOT describe — execute. " \
+            base_system
+            + "Use tools to complete the task. Do NOT describe — execute. "
             "When finished, call the task_complete tool with a summary."
+        )
 
         result = await self.agent.brain.agent_loop(
             task=command,
@@ -536,16 +573,17 @@ If multiple commands, separate with &&."""
 
             # Project tasks must have step results
             if rtype == "project":
-                step_results = result.get("results", [])
+                step_results = result.get("steps", result.get("results", []))
                 if step_results:
                     return {"honest": True, "reason": f"Project executed {len(step_results)} steps"}
                 return {"honest": False, "reason": "Project plan had no executed steps"}
 
             # Computer tasks must have look_and_act steps
             if rtype == "computer":
-                steps = result.get("steps_taken", 0)
-                if steps > 0:
-                    return {"honest": True, "reason": f"Computer control executed {steps} vision-action steps"}
+                steps = result.get("steps", result.get("steps_taken", []))
+                count = len(steps) if isinstance(steps, list) else steps
+                if count > 0:
+                    return {"honest": True, "reason": f"Computer control executed {count} vision-action steps"}
                 return {"honest": False, "reason": "Computer task had no executed steps"}
 
         # Default: pass through (benefit of the doubt for unknown types)
@@ -627,6 +665,20 @@ If multiple commands, separate with &&."""
 
     async def _idle_think(self):
         logger.info("Entering idle/creative mode...")
+
+        # Check if goals have a suggested next task
+        if hasattr(self.agent, 'goals') and self.agent.goals:
+            try:
+                suggestion = await self.agent.goals.suggest_next_task(self.agent.brain)
+                if suggestion and suggestion.get("goal"):
+                    goal = suggestion["goal"]
+                    task_title = goal.get("title", "")
+                    if task_title:
+                        logger.info("Goal system suggests: %s", task_title[:80])
+                        await self.agent.command_queue.put(task_title)
+            except Exception as e:
+                logger.debug("Goal suggestion error: %s", e)
+
         context = self.agent.memory.build_context()
         tasks = self.agent.memory.get_recent_tasks(10)
         history = "\n".join(f"- [{t['status']}] {t['task']}" for t in tasks)

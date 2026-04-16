@@ -47,6 +47,11 @@ from core.session import SessionManager
 from core.persona_drift import PersonaDrift
 from core.email_client import GmailClient
 from core.calendar_client import CalendarClient
+from core.vector_memory import VectorMemory
+from core.knowledge_graph import KnowledgeGraph
+from core.planner import PlanExecuteReflect
+from core.error_patterns import ErrorPatternDB
+from core.goals import GoalTree
 from actions.executor import ActionExecutor, ToolManager
 
 
@@ -142,6 +147,7 @@ class NAOMIAgent:
             os.path.join(PROJECT_DIR, self.config.get("memory", {}).get("db_path", "data/naomi_memory.db"))
         )
         self.brain = Brain(self.config.get("brain", {}))
+        self.brain.set_memory(self.memory)  # Wire metrics logging
         self.actions = ActionExecutor(self.memory, PROJECT_DIR, brain=self.brain)
         self.tool_manager = ToolManager(self.memory, self.actions)
         self.evolution = SelfEvolution(self.brain, self.memory, PROJECT_DIR)
@@ -156,6 +162,43 @@ class NAOMIAgent:
         self.persona_drift = PersonaDrift(self.brain, self.memory)
         self.gmail = GmailClient()
         self.calendar = CalendarClient()
+
+        # v2.0: Intelligence upgrade modules (graceful degradation)
+        db_path = os.path.join(
+            PROJECT_DIR, self.config.get("memory", {}).get("db_path", "data/naomi_memory.db")
+        )
+        try:
+            self.vector_memory = VectorMemory(db_path)
+        except Exception as e:
+            self.logger.warning("VectorMemory init failed: %s — disabled", e)
+            self.vector_memory = None
+        try:
+            self.knowledge_graph = KnowledgeGraph(db_path)
+        except Exception as e:
+            self.logger.warning("KnowledgeGraph init failed: %s — disabled", e)
+            self.knowledge_graph = None
+        self.planner = PlanExecuteReflect()
+        try:
+            self.error_patterns = ErrorPatternDB(db_path)
+        except Exception as e:
+            self.logger.warning("ErrorPatternDB init failed: %s — disabled", e)
+            self.error_patterns = None
+        try:
+            self.goals = GoalTree(db_path)
+        except Exception as e:
+            self.logger.warning("GoalTree init failed: %s — disabled", e)
+            self.goals = None
+
+        # MCP client — auto-connect configured servers
+        try:
+            from core.mcp_client import MCPClient
+            self.mcp_client = MCPClient()
+            # Don't auto-connect at startup — lazy connect on first use
+            self.logger.info("MCP client initialized")
+        except Exception as e:
+            self.logger.warning("MCP client init failed: %s", e)
+            self.mcp_client = None
+
         self.heartbeat = Heartbeat(self)
 
         # Command queue for receiving commands from dashboard/API

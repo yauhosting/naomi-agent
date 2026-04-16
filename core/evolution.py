@@ -26,6 +26,20 @@ COOLDOWN_AFTER_FAILURE = 3600  # 1 hour cooldown after a failed fix
 MAX_CONSECUTIVE_FAILURES = 3   # After N failures, disable auto-evolution until manual reset
 SIMULATION_ROUNDS = 3          # Number of simulation/review rounds before applying
 
+# ── PROTECTED FILES ──────────────────────────────────────────────
+# Self-evolution MUST NOT scan or modify these files.
+# History: NAOMI has repeatedly broken herself by deleting methods from
+# brain.py and telegram_bot.py during evolution cycles (e.g. _call_fast
+# removal caused total Telegram silence).  Only Master may edit these.
+PROTECTED_FILES = frozenset({
+    "core/brain.py",
+    "core/evolution.py",
+    "communication/telegram_bot.py",
+    "communication/dashboard.py",
+    "naomi.py",
+    "run.py",
+})
+
 
 class AgentCouncil:
     """Multiple agents debate and reach consensus before changes."""
@@ -165,6 +179,11 @@ class SelfEvolution:
                     continue
                 path = os.path.join(root, f)
                 rel_path = os.path.relpath(path, self.project_dir)
+
+                # Skip protected files — only Master may modify these
+                if rel_path in PROTECTED_FILES:
+                    continue
+
                 try:
                     with open(path, "r") as fh:
                         code = fh.read()
@@ -207,6 +226,12 @@ class SelfEvolution:
         full_path = os.path.join(self.project_dir, file_path)
         if not os.path.exists(full_path):
             return {"error": f"File not found: {file_path}"}
+
+        # Block modification of protected core files
+        rel = os.path.relpath(full_path, self.project_dir)
+        if rel in PROTECTED_FILES:
+            logger.warning("auto_fix BLOCKED: %s is a protected file", rel)
+            return {"action": "blocked", "reason": f"{rel} is protected — only Master may modify it"}
 
         with open(full_path, "r") as f:
             original_code = f.read()

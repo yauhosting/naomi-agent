@@ -168,12 +168,15 @@ class TelegramBot:
                 "/status - Agent status\n"
                 "/model - View/switch brain model\n"
                 "/discover - Discover/install capabilities\n"
+                "/skill <search|install|list> - ClawHub skill marketplace\n"
                 "/tasks - Recent tasks\n"
                 "/memory - Memory stats\n"
                 "/skills - Learned skills\n"
                 "/think <topic> - Let NAOMI think\n"
                 "/search <query> - Web search\n"
+                "/research <topic> - Deep research with report\n"
                 "/council <topic> - Multi-agent debate\n"
+                "/discuss <topic> - Claude vs GPT-5.4 cross-model debate\n"
                 "/evolve - Trigger self-evolution\n"
                 "/shell <cmd> - Execute shell command\n"
                 "/schedule - Manage scheduled tasks\n"
@@ -184,13 +187,154 @@ class TelegramBot:
                 "/type <text> - Type text\n"
                 "/key <key> - Press key (return, cmd+c...)\n"
                 "/app [name] - Open app / list windows\n"
+                "/voice <text> - Text-to-speech / toggle voice mode\n"
+                "/goal <title> - Manage goals & subgoals\n"
+                "/remember <text> - Store in vector memory\n"
+                "/recall <query> - Semantic memory search\n"
+                "/graph <entity> - Knowledge graph query\n"
+                "/browse <url> - Browser automation\n"
                 "/private - Toggle privacy mode (local only)\n"
+                "/persona - Manage personas (YUMIKO etc.)\n"
+                "/session - Session management\n"
+                "/email - Gmail operations\n"
+                "/cal - Google Calendar\n"
                 "/ollama - Manage local Ollama models\n"
                 "/security - Run security scan\n"
                 "/audit - View audit log\n"
                 "/log - Recent activity log\n\n"
                 "Or just type anything to give NAOMI a task."
             )
+
+        elif cmd == "/help":
+            if not args:
+                # Show categorized menu
+                await self._send(chat_id,
+                    "NAOMI Help - Choose a category:\n\n"
+                    "/help brain - LLM models & switching\n"
+                    "/help chat - Conversation & voice\n"
+                    "/help tools - Shell, code, web, browser\n"
+                    "/help skills - ClawHub marketplace & skills\n"
+                    "/help memory - Memory, knowledge graph, recall\n"
+                    "/help goals - Goal management & planning\n"
+                    "/help research - Deep research pipeline\n"
+                    "/help computer - Screenshot, click, GUI control\n"
+                    "/help comms - Email, calendar, TTS\n"
+                    "/help security - Security, sandbox, audit\n"
+                    "/help system - Status, evolution, metrics\n"
+                    "/help private - YUMIKO & privacy mode\n\n"
+                    "Or type /start for quick command list."
+                )
+            else:
+                cat = args.lower()
+                help_pages = {
+                    "brain": (
+                        "Brain & Models\n\n"
+                        "/model - View current model\n"
+                        "/model <name> - Switch model\n"
+                        "/model list - Show all available\n\n"
+                        "Available: claude-sonnet, claude-opus, claude-cli, "
+                        "openai (GPT-5.4), openai-mini, openai-o3, "
+                        "ollama, ollama-gemma, ollama-coder, "
+                        "glm, minimax, auto\n\n"
+                        "/discuss <topic> - Claude vs GPT-5.4 debate\n"
+                        "/council <topic> - Multi-agent council debate"
+                    ),
+                    "chat": (
+                        "Chat & Voice\n\n"
+                        "Just type anything to chat with NAOMI.\n\n"
+                        "/voice on|off - Toggle voice replies\n"
+                        "/voice <text> - One-time TTS\n"
+                        "Send a voice message - auto-transcribed to text\n\n"
+                        "/think <topic> - Deep thinking mode"
+                    ),
+                    "tools": (
+                        "Tools & Execution\n\n"
+                        "/shell <cmd> - Run shell command\n"
+                        "/browse <url> - Open page & extract content\n"
+                        "/search <query> - Web search (DuckDuckGo)\n\n"
+                        "Just describe a task - NAOMI auto-selects tools."
+                    ),
+                    "skills": (
+                        "ClawHub Skill Marketplace\n\n"
+                        "/skill search <query> - Search 13,000+ skills\n"
+                        "/skill inspect <slug> - View skill details\n"
+                        "/skill install <slug> - Install (with security scan)\n"
+                        "/skill list - Show installed skills\n\n"
+                        "/discover - Auto-discover needed capabilities\n"
+                        "/discover scan - Scan for missing tools"
+                    ),
+                    "memory": (
+                        "Memory & Knowledge\n\n"
+                        "/remember <text> - Store in vector memory\n"
+                        "/recall <query> - Semantic memory search\n"
+                        "/graph <entity> - Knowledge graph query\n"
+                        "/memory - Memory statistics\n\n"
+                        "NAOMI auto-stores conversations and extracts knowledge."
+                    ),
+                    "goals": (
+                        "Goals & Planning\n\n"
+                        "/goal - View active goals\n"
+                        "/goal add <title> - Add new goal (auto-decomposes)\n"
+                        "/goal done <id> - Complete a goal\n\n"
+                        "Complex tasks auto-use plan-execute-reflect loop."
+                    ),
+                    "research": (
+                        "Deep Research\n\n"
+                        "/research <topic> - Multi-source research pipeline\n"
+                        "  1. Decomposes into sub-questions\n"
+                        "  2. Parallel web search & extraction\n"
+                        "  3. Cross-reference findings\n"
+                        "  4. Structured report with citations"
+                    ),
+                    "computer": (
+                        "Computer Control\n\n"
+                        "/screen - Take screenshot\n"
+                        "/click x y - Click coordinates\n"
+                        "/type <text> - Type text\n"
+                        "/key <key> - Press key (return, cmd+c...)\n"
+                        "/app [name] - Open app / list windows\n"
+                        "/scroll up|down [amount]"
+                    ),
+                    "comms": (
+                        "Communications\n\n"
+                        "/email - Gmail operations\n"
+                        "/cal - Google Calendar\n"
+                        "/voice - Text-to-speech settings\n\n"
+                        "Supports: Kokoro (MLX), Qwen3-TTS, Edge TTS"
+                    ),
+                    "security": (
+                        "Security & Safety\n\n"
+                        "/security - Run security scan\n"
+                        "/audit - View audit log\n\n"
+                        "Core files protected from self-evolution\n"
+                        "ClawHub skills scanned by Claude + GPT-5.4\n"
+                        "Sensitive commands logged\n"
+                        "Docker sandbox for risky operations"
+                    ),
+                    "system": (
+                        "System & Administration\n\n"
+                        "/status - Agent status & uptime\n"
+                        "/usage - API usage statistics\n"
+                        "/log - Recent activity log\n"
+                        "/evolve - Trigger self-evolution\n"
+                        "/schedule - Managed scheduled tasks\n"
+                        "/session - Session management\n\n"
+                        "Dashboard: http://127.0.0.1:18802"
+                    ),
+                    "private": (
+                        "Privacy Mode\n\n"
+                        "/private - Toggle YUMIKO mode (local only)\n"
+                        "/private off - Return to NAOMI mode\n"
+                        "/persona - Manage personas\n\n"
+                        "Private mode: all processing on local Ollama.\n"
+                        "No data leaves your machine."
+                    ),
+                }
+                page = help_pages.get(
+                    cat,
+                    f"Unknown category: {cat}\nUse /help to see categories.",
+                )
+                await self._send(chat_id, page)
 
         elif cmd == "/status":
             status = {
@@ -320,6 +464,223 @@ class TelegramBot:
                 else:
                     await self._send(chat_id, "Usage: /discover [install|pkg|tool|scan] <name>")
 
+        elif cmd == "/skill":
+            if not hasattr(self.agent, 'discovery'):
+                await self._send(chat_id, "Discovery engine not initialized.")
+                return
+            if not args:
+                await self._send(chat_id,
+                    "🧩 ClawHub Skill Marketplace (13,000+ skills)\n\n"
+                    "/skill search <query> — Search skills\n"
+                    "/skill install <slug> — Install with security scan\n"
+                    "/skill list — Show installed skills\n"
+                    "/skill inspect <slug> — View skill details"
+                )
+                return
+            sub = args.split(None, 1)
+            sub_cmd = sub[0].lower()
+            sub_args = sub[1] if len(sub) > 1 else ""
+
+            if sub_cmd == "search" and sub_args:
+                await self._send(chat_id, f"🔍 Searching ClawHub: {sub_args}")
+                import asyncio as _aio
+                result = await _aio.to_thread(
+                    self.agent.discovery.clawhub_search, sub_args
+                )
+                if result.get("success") and result.get("results"):
+                    lines = []
+                    for s in result["results"]:
+                        lines.append(f"  `{s['slug']}` — {s['name']} ({s.get('score', '')})")
+                    await self._send(chat_id,
+                        f"Found {len(result['results'])} skills:\n" + "\n".join(lines)
+                        + "\n\nInstall: /skill install <slug>"
+                    )
+                else:
+                    await self._send(chat_id, f"No skills found for '{sub_args}'")
+
+            elif sub_cmd == "inspect" and sub_args:
+                await self._send(chat_id, f"🔎 Inspecting: {sub_args}")
+                import asyncio as _aio
+                result = await _aio.to_thread(
+                    self.agent.discovery.clawhub_inspect, sub_args
+                )
+                if result.get("success"):
+                    await self._send(chat_id,
+                        f"📦 {result['name']} (v{result['version']})\n"
+                        f"By: {result['owner']}\n"
+                        f"⬇️ {result['downloads']} downloads | ⭐ {result['stars']}\n\n"
+                        f"{result['summary'][:500]}\n\n"
+                        f"Install: /skill install {sub_args}"
+                    )
+                else:
+                    await self._send(chat_id, f"Not found: {result.get('error', '?')}")
+
+            elif sub_cmd == "install" and sub_args:
+                await self._send(chat_id,
+                    f"⬇️ Downloading {sub_args}...\n"
+                    "🔒 Will run Claude + GPT-5.4 dual security scan before installing."
+                )
+                await self._send_typing(chat_id)
+                import asyncio as _aio
+                result = await _aio.to_thread(
+                    self.agent.discovery.clawhub_install, sub_args
+                )
+                if result.get("success"):
+                    await self._send(chat_id,
+                        f"✅ Skill `{sub_args}` installed!\n"
+                        f"Security scan: PASSED ✅\n"
+                        f"Path: {result.get('path', '?')}"
+                    )
+                elif result.get("action") == "rejected_and_inspired":
+                    inspired = result.get("inspired_skill", {})
+                    msg = (
+                        f"🚫 Skill `{sub_args}` REJECTED by security scan\n"
+                        f"Flagged by: {result.get('flagged_by', '?')}\n"
+                        f"Reason: {result.get('reason', '?')[:300]}\n"
+                    )
+                    if inspired.get("success"):
+                        msg += f"\n✨ Created safe alternative: `{inspired['slug']}`"
+                    await self._send(chat_id, msg)
+                else:
+                    await self._send(chat_id,
+                        f"❌ Install failed: {result.get('error', '?')[:300]}"
+                    )
+
+            elif sub_cmd == "list":
+                if hasattr(self.agent, 'skills'):
+                    skills = self.agent.skills.list_skills()
+                    if skills:
+                        lines = [f"  `{s['name']}` — {s.get('description', '')[:60]}" for s in skills]
+                        await self._send(chat_id,
+                            f"📦 Installed Skills ({len(skills)}):\n" + "\n".join(lines)
+                        )
+                    else:
+                        await self._send(chat_id, "No skills installed yet.")
+                else:
+                    await self._send(chat_id, "Skill manager not initialized.")
+            else:
+                await self._send(chat_id, "Usage: /skill <search|install|inspect|list> <name>")
+
+        elif cmd == "/remember":
+            if not args:
+                await self._send(chat_id, "Usage: /remember <text to store in vector memory>")
+                return
+            if hasattr(self.agent, 'vector_memory'):
+                import asyncio as _aio
+                row_id = await _aio.to_thread(
+                    self.agent.vector_memory.add, args, "user_memory"
+                )
+                await self._send(chat_id, f"🧠 Stored in vector memory (id: {row_id})")
+                # Also extract knowledge triples
+                if hasattr(self.agent, 'knowledge_graph'):
+                    await _aio.to_thread(
+                        self.agent.knowledge_graph.extract_from_text, args, self.agent.brain
+                    )
+            else:
+                await self._send(chat_id, "Vector memory not initialized.")
+
+        elif cmd == "/recall":
+            if not args:
+                await self._send(chat_id, "Usage: /recall <query> — semantic memory search")
+                return
+            if hasattr(self.agent, 'vector_memory'):
+                import asyncio as _aio
+                results = await _aio.to_thread(
+                    self.agent.vector_memory.search, args, 5
+                )
+                if results:
+                    lines = []
+                    for r in results:
+                        score = f"{r.get('score', 0):.2f}"
+                        text = r.get('text', '')[:120]
+                        lines.append(f"  [{score}] {text}")
+                    await self._send(chat_id, f"🔍 Found {len(results)} memories:\n" + "\n".join(lines))
+                else:
+                    await self._send(chat_id, "No matching memories found.")
+            else:
+                await self._send(chat_id, "Vector memory not initialized.")
+
+        elif cmd == "/graph":
+            if not args:
+                await self._send(chat_id, "Usage: /graph <entity> — query knowledge graph")
+                return
+            if hasattr(self.agent, 'knowledge_graph'):
+                import asyncio as _aio
+                context = await _aio.to_thread(
+                    self.agent.knowledge_graph.get_context, args
+                )
+                if context:
+                    await self._send(chat_id, f"🕸️ Knowledge about '{args}':\n\n{context[:3000]}")
+                else:
+                    await self._send(chat_id, f"No knowledge found about '{args}'.")
+            else:
+                await self._send(chat_id, "Knowledge graph not initialized.")
+
+        elif cmd == "/goal":
+            if not hasattr(self.agent, 'goals'):
+                await self._send(chat_id, "Goal system not initialized.")
+                return
+            if not args:
+                # Show current goals
+                import asyncio as _aio
+                stats = await _aio.to_thread(self.agent.goals.get_stats)
+                active = await _aio.to_thread(self.agent.goals.get_active_goals, 5)
+                msg = (
+                    f"🎯 Goals: {stats.get('active', 0)} active, "
+                    f"{stats.get('completed', 0)} completed\n\n"
+                )
+                if active:
+                    for g in active:
+                        msg += f"  [{g.priority}] {g.title}\n"
+                else:
+                    msg += "No active goals.\n"
+                msg += "\n/goal add <title> — New goal\n/goal done <id> — Complete"
+                await self._send(chat_id, msg)
+            else:
+                sub = args.split(None, 1)
+                sub_cmd = sub[0].lower()
+                sub_args = sub[1] if len(sub) > 1 else ""
+                import asyncio as _aio
+                if sub_cmd == "add" and sub_args:
+                    goal_id = await _aio.to_thread(self.agent.goals.add_goal, sub_args)
+                    await self._send(chat_id, f"🎯 Goal added (id: {goal_id}): {sub_args}")
+                    # Auto-decompose
+                    await self._send_typing(chat_id)
+                    subs = await _aio.to_thread(
+                        self.agent.goals.decompose, goal_id, self.agent.brain
+                    )
+                    if subs.get("success") and subs.get("subgoals"):
+                        lines = [f"  └ {s['title']}" for s in subs["subgoals"][:5]]
+                        await self._send(chat_id, "Auto-decomposed:\n" + "\n".join(lines))
+                elif sub_cmd == "done" and sub_args.isdigit():
+                    result = await _aio.to_thread(self.agent.goals.complete_goal, int(sub_args))
+                    if result.get("success"):
+                        await self._send(chat_id, f"✅ Goal {sub_args} completed!")
+                    else:
+                        await self._send(chat_id, f"❌ {result.get('error', '?')}")
+                else:
+                    await self._send(chat_id, "Usage: /goal [add <title> | done <id>]")
+
+        elif cmd == "/browse":
+            if not args:
+                await self._send(chat_id, "Usage: /browse <url> — open and extract page content")
+                return
+            await self._send(chat_id, f"🌐 Browsing: {args}")
+            await self._send_typing(chat_id)
+            try:
+                from core.browser import BrowserAgent
+                browser = BrowserAgent()
+                result = await browser.navigate(args)
+                if result.get("success"):
+                    text = result.get("text_preview", "")[:2000]
+                    title = result.get("title", "?")
+                    await self._send(chat_id, f"📄 {title}\n\n{text}")
+                else:
+                    await self._send(chat_id, f"❌ {result.get('error', 'Failed')}")
+                await browser.close()
+            except Exception as e:
+                await self._send(chat_id, f"Browser error: {e}")
+
         elif cmd == "/tasks":
             tasks = self.agent.memory.get_recent_tasks(5)
             if not tasks:
@@ -400,6 +761,114 @@ class TelegramBot:
             if steps:
                 msg += "\n\nAction Steps:\n" + "\n".join(f"- {s}" for s in steps[:5])
             await self._send(chat_id, msg)
+
+        elif cmd == "/discuss":
+            if not args:
+                await self._send(chat_id, "Usage: /discuss <topic>\nExample: /discuss AI是否會取代人類工作")
+                return
+            # Parse optional round count: /discuss 5 topic here
+            parts = args.split(None, 1)
+            rounds = 3
+            topic = args
+            if parts[0].isdigit():
+                rounds = min(int(parts[0]), 5)  # max 5 rounds
+                topic = parts[1] if len(parts) > 1 else ""
+            if not topic:
+                await self._send(chat_id, "Usage: /discuss <topic>")
+                return
+            await self._send(chat_id, f"⚔️ Claude vs GPT-5.4 辯論開始\n主題：{topic}\n回合：{rounds}")
+            await self._send_typing(chat_id)
+
+            import asyncio as _aio
+            result = await _aio.to_thread(
+                self.agent.brain.cross_model_discuss, topic, rounds
+            )
+
+            if result.get("error"):
+                await self._send(chat_id, f"❌ {result['error']}")
+                return
+
+            # Send each round
+            for entry in result.get("debate_log", []):
+                icon = "🟣" if entry["model"] == "Claude" else "🟢"
+                msg = f"{icon} **{entry['model']}** (R{entry['round']})\n{entry['content']}"
+                await self._send(chat_id, msg[:4000])
+                await _aio.sleep(0.5)
+
+            # Send summary
+            summary = result.get("summary", "")
+            if summary:
+                await self._send(chat_id, f"🏆 **NAOMI 總結**\n\n{summary[:4000]}")
+
+        elif cmd == "/research":
+            if not args:
+                await self._send(chat_id, "Usage: /research <topic>\nExample: /research AI agents 2024 trends")
+                return
+            # Parse optional depth: /research 5 topic here
+            parts = args.split(None, 1)
+            depth = 3
+            topic = args
+            if parts[0].isdigit() and len(parts) > 1:
+                depth = max(2, min(int(parts[0]), 5))
+                topic = parts[1]
+            if not topic:
+                await self._send(chat_id, "Usage: /research <topic>")
+                return
+
+            await self._send(chat_id, f"Deep research started\nTopic: {topic}\nSub-questions: {depth}")
+
+            async def _research_progress(msg: str):
+                await self._send(chat_id, msg)
+
+            try:
+                from core.researcher import DeepResearcher
+                researcher = DeepResearcher(self.agent.brain, self.agent.actions)
+
+                # Keep typing indicator active
+                typing_active = True
+                async def keep_typing_research():
+                    while typing_active:
+                        try:
+                            await self._send_typing(chat_id)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(4)
+                typing_task = asyncio.create_task(keep_typing_research())
+
+                result = await researcher.research(
+                    topic, depth=depth, progress_callback=_research_progress
+                )
+
+                typing_active = False
+                typing_task.cancel()
+
+                if result.get("success"):
+                    # Send individual findings progressively
+                    for i, finding in enumerate(result.get("findings", []), 1):
+                        q = finding.get("question", "")
+                        a = finding.get("answer", "")[:800]
+                        src_count = len(finding.get("sources", []))
+                        await self._send(chat_id,
+                            f"Finding {i}/{len(result['findings'])}: {q}\n\n{a}\n\n({src_count} sources)"
+                        )
+                        await asyncio.sleep(0.5)
+
+                    # Send final report
+                    report = result.get("report", "")
+                    duration = result.get("duration_seconds", 0)
+                    if report:
+                        header = f"Research Report ({duration}s)\n{'=' * 30}\n\n"
+                        full = header + report
+                        for i in range(0, len(full), 3800):
+                            chunk = full[i:i + 3800]
+                            if chunk.strip():
+                                await self._send(chat_id, chunk)
+                else:
+                    await self._send(chat_id, f"Research failed: {result.get('report', 'Unknown error')}")
+
+            except Exception as e:
+                logger.error("Research command error: %s", e)
+                await self._send(chat_id, f"Research error: {str(e)[:300]}")
 
         elif cmd == "/evolve":
             await self._send(chat_id, "Triggering evolution cycle...")
@@ -938,7 +1407,7 @@ class TelegramBot:
                     await self._send(chat_id, "TTS failed. Need ffmpeg installed.")
 
         else:
-            await self._send(chat_id, f"Unknown command: {cmd}\nType /start for help.")
+            await self._send(chat_id, f"Unknown command: {cmd}\nType /help for categories or /start for quick list.")
 
     def _get_session_id(self, persona: str) -> str:
         """Get or create session for the current persona."""
@@ -1065,12 +1534,47 @@ class TelegramBot:
                 mem_hints = chr(10).join(f'- {m["title"]}: {m["content"][:150]}' for m in relevant)
                 persona_prompt += chr(10) + 'Your relevant memories:' + chr(10) + mem_hints
 
+            # Enrich context with vector memory + knowledge graph
+            if hasattr(self.agent, 'vector_memory') and self.agent.vector_memory:
+                try:
+                    memories = self.agent.vector_memory.search(text, limit=3)
+                    if memories:
+                        persona_prompt += "\n\nRelevant memories:\n"
+                        persona_prompt += "\n".join(
+                            f"- {m.get('text', '')[:150]}" for m in memories
+                        )
+                except Exception as e:
+                    logger.debug("Vector memory search error: %s", e)
+
+            if hasattr(self.agent, 'knowledge_graph') and self.agent.knowledge_graph:
+                try:
+                    words = [w for w in text.split() if len(w) > 2][:3]
+                    for word in words:
+                        kg_context = self.agent.knowledge_graph.get_context(word, limit=3)
+                        if kg_context:
+                            persona_prompt += (
+                                f"\n\nKnowledge about '{word}':\n{kg_context[:300]}"
+                            )
+                            break
+                except Exception as e:
+                    logger.debug("Knowledge graph query error: %s", e)
+
             response = self.agent.brain.think_smart(text, persona_prompt)
             self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
             self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
             self._last_response_len = len(response)
             self._last_response_time = time.time()
             await self._send(chat_id, response[:3500])
+
+            # Store conversation in vector memory for future recall
+            if hasattr(self.agent, 'vector_memory') and self.agent.vector_memory:
+                try:
+                    self.agent.vector_memory.add(
+                        f"Q: {text[:200]} A: {response[:200]}",
+                        category="conversation",
+                    )
+                except Exception as e:
+                    logger.debug("Vector memory store error: %s", e)
 
             # Background: extract memories (NAOMI only, not YUMIKO)
             if hasattr(self.agent, 'memory_agent'):
@@ -1372,23 +1876,12 @@ class TelegramBot:
             # Step 2: Download voice file
             voice_resp = await self.client.get(download_url, timeout=30)
             ogg_path = "/tmp/naomi_voice.ogg"
-            wav_path = "/tmp/naomi_voice.wav"
             with open(ogg_path, "wb") as f:
                 f.write(voice_resp.content)
 
-            # Step 3: Convert to WAV with ffmpeg
-            import subprocess
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", wav_path],
-                capture_output=True, timeout=30,
-            )
-
-            if not os.path.exists(wav_path):
-                await self._send(chat_id, "語音轉換失敗")
-                return ""
-
-            # Step 4: Transcribe using Whisper (local) or Groq API
-            transcript = await self._run_whisper(wav_path)
+            # Step 3: Transcribe using unified STT engine (handles format conversion internally)
+            from core.stt import transcribe
+            transcript = await transcribe(ogg_path, language="auto")
 
             if not transcript:
                 await self._send(chat_id, "語音辨識失敗，請改用文字")
@@ -1398,7 +1891,7 @@ class TelegramBot:
             await self._send(chat_id, f"🎤 聽到: {transcript[:200]}")
 
             # Cleanup
-            for p in [ogg_path, wav_path]:
+            for p in [ogg_path, ogg_path.replace(".ogg", ".wav")]:
                 try:
                     os.unlink(p)
                 except OSError:
@@ -1410,54 +1903,6 @@ class TelegramBot:
             logger.error(f"Voice transcription error: {e}")
             await self._send(chat_id, f"語音處理出錯: {str(e)[:100]}")
             return ""
-
-    async def _run_whisper(self, wav_path: str) -> str:
-        """Transcribe audio using local Whisper or Groq API."""
-        # Method 1: Try local whisper
-        try:
-            import whisper
-            model = whisper.load_model("base")
-            result = model.transcribe(wav_path, language="zh")
-            return result.get("text", "").strip()
-        except ImportError:
-            pass
-
-        # Method 2: Try Groq API (free, fast Whisper)
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        if groq_key:
-            try:
-                with open(wav_path, "rb") as f:
-                    audio_data = f.read()
-                resp = await self.client.post(
-                    "https://api.groq.com/openai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {groq_key}"},
-                    files={"file": ("audio.wav", audio_data, "audio/wav")},
-                    data={"model": "whisper-large-v3", "language": "zh"},
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("text", "").strip()
-            except Exception as e:
-                logger.debug(f"Groq whisper failed: {e}")
-
-        # Method 3: Use Claude CLI to describe what the user might be saying
-        # (fallback — not real STT, just acknowledges voice was received)
-        import subprocess
-        try:
-            # Install whisper if not present
-            subprocess.run(
-                ["pip3", "install", "--break-system-packages", "openai-whisper"],
-                capture_output=True, timeout=120,
-            )
-            import importlib
-            whisper = importlib.import_module("whisper")
-            model = whisper.load_model("base")
-            result = model.transcribe(wav_path, language="zh")
-            return result.get("text", "").strip()
-        except Exception as e:
-            logger.error(f"Whisper install/run failed: {e}")
-
-        return ""
 
     async def _send_typing(self, chat_id: int):
         """Send 'typing...' indicator to Telegram."""
@@ -1488,6 +1933,72 @@ class TelegramBot:
                     logger.error("Telegram send HTTP %d: %s", resp.status_code, resp.text[:200])
             except Exception as e:
                 logger.error("Telegram send error: %s", e)
+
+    async def _send_streaming(self, chat_id: int, generator_func, *args):
+        """Send a streaming response by progressively editing a Telegram message.
+
+        1. Send initial "..." message, get message_id
+        2. Call generator_func(*args) which yields text chunks
+        3. Every 800ms, edit the message with accumulated text
+        4. Final edit with complete text
+        """
+        # Send initial placeholder message
+        try:
+            resp = await self.client.post(
+                f"{self.base_url}/sendMessage",
+                json={"chat_id": chat_id, "text": "..."},
+            )
+            if resp.status_code != 200:
+                logger.error("Streaming: failed to send initial message")
+                return
+            msg_data = resp.json()
+            message_id = msg_data.get("result", {}).get("message_id")
+            if not message_id:
+                logger.error("Streaming: no message_id in response")
+                return
+        except Exception as e:
+            logger.error("Streaming: initial send error: %s", e)
+            return
+
+        accumulated = ""
+        last_edit_time = time.time()
+        edit_interval = 0.8  # seconds between edits
+
+        try:
+            async for chunk in generator_func(*args):
+                accumulated += chunk
+                now = time.time()
+                # Only edit if enough time has passed to avoid rate limits
+                if now - last_edit_time >= edit_interval:
+                    display_text = accumulated or "..."
+                    try:
+                        await self.client.post(
+                            f"{self.base_url}/editMessageText",
+                            json={
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "text": display_text[:4000],
+                            },
+                        )
+                        last_edit_time = now
+                    except Exception as edit_err:
+                        logger.debug("Streaming edit error: %s", edit_err)
+        except Exception as gen_err:
+            logger.error("Streaming generator error: %s", gen_err)
+
+        # Final edit with complete text
+        final_text = accumulated.strip() or "(empty response)"
+        try:
+            await self.client.post(
+                f"{self.base_url}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": final_text[:4000],
+                },
+            )
+        except Exception as e:
+            logger.error("Streaming final edit error: %s", e)
 
     async def _send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
         """Send a photo to Telegram."""

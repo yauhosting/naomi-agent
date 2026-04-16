@@ -1,7 +1,7 @@
 # NAOMI Agent Configuration
 agent:
   name: "NAOMI"
-  version: "0.4.0"
+  version: "0.5.0"
   description: "Autonomous AI Agent - Digital Life Form"
 
 brain:
@@ -53,6 +53,22 @@ computer:
   screenshot_dir: "/tmp/naomi_screenshots"
   max_steps: 15            # max vision-action loop steps
   cleanup_keep: 20         # keep latest N screenshots
+
+tts:
+  backend: "kokoro"            # "kokoro" | "qwen3" | "edge" | "auto"
+  kokoro:
+    model: "mlx-community/Kokoro-82M-bf16"
+    voice: "zf_xiaobei"        # Chinese female preset
+    speed: 1.0
+    lang_code: "z"             # z=Chinese, a=American EN, j=Japanese
+  qwen3:
+    model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"
+    speaker: "Vivian"          # Vivian, Serena, Ryan, Aiden, etc.
+    instruct: ""               # emotion/style e.g. "Very happy and excited."
+    ref_audio: ""              # path to .wav for voice cloning (Base models only)
+    ref_text: ""               # transcript of ref_audio
+  edge:
+    voice: "zh-TW-HsiaoChenNeural"
 
 telegram:
   enabled: true

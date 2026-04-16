@@ -8,6 +8,7 @@ Flow: plan -> execute each step -> reflect -> adjust -> repeat
 """
 import json
 import time
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
@@ -321,7 +322,7 @@ class PlanExecuteReflect:
         run_start = time.monotonic()
 
         # Phase 1: Plan
-        steps = self.plan(task, brain, context)
+        steps = await asyncio.to_thread(self.plan, task, brain, context)
         if not steps:
             result = PlanExecutionResult(
                 success=False,
@@ -366,7 +367,8 @@ class PlanExecuteReflect:
                 execution_log.append(entry)
 
                 # Phase 3: Reflect
-                reflection = self.reflect(
+                reflection = await asyncio.to_thread(
+                    self.reflect,
                     step,
                     step.get("expected", ""),
                     exec_result["output"],
@@ -403,7 +405,7 @@ class PlanExecuteReflect:
                         f"Error: {exec_result['output'][:500]}\n"
                         f"Generate remaining steps to complete the task."
                     )
-                    new_steps = self.plan(remaining_task, brain, context)
+                    new_steps = await asyncio.to_thread(self.plan, remaining_task, brain, context)
                     if new_steps:
                         # Replace remaining steps
                         for j, ns in enumerate(new_steps):

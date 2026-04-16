@@ -284,7 +284,7 @@ class Heartbeat:
     async def _handle_think_task(self, command: str, context: str) -> str:
         """Pure Q&A — brain answers a question. No action taken."""
         logger.info("Handling as THINK task (pure Q&A, no action)")
-        response = self.agent.brain.think(command, context)
+        response = await asyncio.to_thread(self.agent.brain.think, command, context)
         logger.info(f"Brain response: {response[:200]}")
         return response
 
@@ -306,7 +306,7 @@ class Heartbeat:
 
         # Use planner for complex multi-step tasks
         if hasattr(self.agent, 'planner') and self.agent.planner:
-            analysis = self.agent.brain.analyze(command)
+            analysis = await asyncio.to_thread(self.agent.brain.analyze, command)
             steps = analysis.get("steps", [])
             if len(steps) >= 3:  # Complex task — use planner
                 logger.info("Complex task (%d steps) — using planner", len(steps))
@@ -348,7 +348,7 @@ class Heartbeat:
 
         # Extract search query from command
         query_prompt = f"Extract the search query from this command. Reply with ONLY the search query, nothing else:\n{command}"
-        search_query = self.agent.brain._think(query_prompt)
+        search_query = await asyncio.to_thread(self.agent.brain._think, query_prompt)
         # Clean up - remove quotes and extra text
         search_query = search_query.strip().strip('"').strip("'")
         if len(search_query) > 200:
@@ -368,8 +368,9 @@ class Heartbeat:
             results_text = "\n\n".join(formatted)
 
             # Let brain summarize
-            summary = self.agent.brain.think(
-                f"Based on these search results, answer the original question: {command}\n\nResults:\n{results_text}"
+            summary = await asyncio.to_thread(
+                self.agent.brain.think,
+                f"Based on these search results, answer the original question: {command}\n\nResults:\n{results_text}",
             )
 
             return {
@@ -381,7 +382,7 @@ class Heartbeat:
             }
         else:
             # Search failed, let brain answer from knowledge
-            fallback = self.agent.brain.think(command, context)
+            fallback = await asyncio.to_thread(self.agent.brain.think, command, context)
             return {
                 "type": "search_fallback",
                 "query": search_query,
@@ -405,7 +406,7 @@ The script should:
 
 Output ONLY the Python code, no explanations."""
 
-        code = self.agent.brain.write_code(code_prompt)
+        code = await asyncio.to_thread(self.agent.brain.write_code, code_prompt)
 
         # Clean up code
         if "```python" in code:
@@ -439,7 +440,7 @@ Working directory: /Users/yokowai/Projects/naomi-agent
 Reply with ONLY the exact shell command(s) to run, one per line. No explanations.
 If multiple commands, separate with &&."""
 
-        shell_cmd = self.agent.brain._think(cmd_prompt)
+        shell_cmd = await asyncio.to_thread(self.agent.brain._think, cmd_prompt)
 
         # Clean up - remove markdown formatting
         if "```" in shell_cmd:
@@ -621,7 +622,7 @@ If multiple commands, separate with &&."""
                 project_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
                 scan = run_security_scan(project_dir)
                 if scan.get("critical", 0) > 0 or scan.get("high", 0) > 0:
-                    asyncio.get_event_loop().create_task(
+                    asyncio.get_running_loop().create_task(
                         self._notify_master(
                             f"🔒 Security scan: {scan['critical']} critical, {scan['high']} high issues found!\n"
                             f"Run /security for details."
@@ -657,7 +658,7 @@ If multiple commands, separate with &&."""
     async def _handle_error(self, error: str):
         logger.info(f"Auto-handling error: {error[:200]}")
         context = self.agent.memory.build_context()
-        fix = self.agent.brain.debug(error, context)
+        fix = await asyncio.to_thread(self.agent.brain.debug, error, context)
         self.agent.memory.remember_short(f"Auto-fix: {fix[:200]}", category="fix")
 
     async def _continue_task(self, task: dict):
@@ -683,7 +684,10 @@ If multiple commands, separate with &&."""
         tasks = self.agent.memory.get_recent_tasks(10)
         history = "\n".join(f"- [{t['status']}] {t['task']}" for t in tasks)
 
-        reflection = self.agent.brain.reflect(f"{context}\n\nRecent history:\n{history}")
+        reflection = await asyncio.to_thread(
+            self.agent.brain.reflect,
+            f"{context}\n\nRecent history:\n{history}",
+        )
 
         if reflection.get("proactive_tasks"):
             for task in reflection["proactive_tasks"][:1]:
@@ -697,7 +701,7 @@ If multiple commands, separate with &&."""
         # Idle capability discovery — check if recent failures need new tools
         if hasattr(self.agent, 'discovery'):
             try:
-                disc_result = self.agent.discovery.idle_discover()
+                disc_result = await asyncio.to_thread(self.agent.discovery.idle_discover)
                 if disc_result.get("action") == "installed":
                     logger.info(f"Idle discovery installed: {disc_result.get('details', [])}")
                 elif disc_result.get("action") == "suggested":
@@ -723,6 +727,7 @@ If multiple commands, separate with &&."""
 
         # Trigger evolution cycle in background thread (doesn't block event loop)
         import threading
+        loop = asyncio.get_running_loop()
         def _run_evolution():
             try:
                 logger.info("Triggering auto-evolution cycle (background)...")
@@ -735,7 +740,6 @@ If multiple commands, separate with &&."""
                         category="evolution"
                     )
                     # Schedule notification (can't await from thread)
-                    loop = asyncio.get_event_loop()
                     if loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self._notify_master(f"🔧 Self-evolution: {bugs} bugs, {fixes} fixes"),

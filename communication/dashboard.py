@@ -516,7 +516,8 @@ function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;
 let ws;
 
 function connectWebSocket() {
-  ws = new WebSocket(WS_URL + '?token=' + TOKEN);
+  const params = new URLSearchParams({token: TOKEN});
+  ws = new WebSocket(WS_URL + '?' + params.toString());
   ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'status') updateStatus(data);

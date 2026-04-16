@@ -16,6 +16,7 @@ import asyncio
 import signal
 import sys
 import os
+import re
 import time
 import yaml
 import logging
@@ -26,6 +27,29 @@ _owned_handlers: list[logging.Handler] = []
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
+
+class _RedactSecretsFilter(logging.Filter):
+    _patterns = (
+        (r'bot[0-9]+:[A-Za-z0-9_-]{35,}', 'bot[REDACTED]'),
+        (r'[0-9]+:[A-Za-z0-9_-]{35,}', '[REDACTED_TELEGRAM_TOKEN]'),
+        (r'sk-[A-Za-z0-9_-]{20,}', '[REDACTED_API_KEY]'),
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for pattern, replacement in self._patterns:
+            message = re.sub(pattern, replacement, message)
+        record.msg = message
+        record.args = ()
+        return True
+
+
+def _mask_identifier(value: object) -> str:
+    text = str(value or "")
+    if len(text) <= 4:
+        return "***"
+    return "***" + text[-4:]
+
 # Add project root to path (guarded so duplicate entries are never created
 # when naomi.py is imported as a module rather than run as a script).
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +59,7 @@ if PROJECT_DIR not in sys.path:
 from core.brain import Brain
 from core.memory import Memory
 from core.heartbeat import Heartbeat
-from core.personality import NAOMI_IDENTITY, SYSTEM_PROMPT
+from core.personality import NAOMI_IDENTITY
 from core.evolution import SelfEvolution, AgentCouncil
 from core.compaction import CompactionEngine
 from core.memory_agent import MemoryExtractionAgent
@@ -79,10 +103,12 @@ def setup_logging(config: dict) -> None:
         log_file, maxBytes=10*1024*1024, backupCount=5
     )
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(_RedactSecretsFilter())
 
     # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(_RedactSecretsFilter())
 
     # Validate log level to avoid arbitrary attribute access on the logging module
     raw_level = log_config.get("level", "INFO")
@@ -94,6 +120,8 @@ def setup_logging(config: dict) -> None:
     root_logger.setLevel(getattr(logging, level_name))
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # Track handlers we own so we can safely remove only these on next call
     _owned_handlers.extend([file_handler, console_handler])
@@ -268,12 +296,16 @@ class NAOMIAgent:
             from core.brain import load_dotenv
             load_dotenv(_os.path.join(PROJECT_DIR, '.env'))
             tg_token = _os.environ.get('TELEGRAM_BOT_TOKEN', '')
-            tg_master = tg_config.get('master_id', 0)
+            tg_master_raw = _os.environ.get('TELEGRAM_MASTER_ID') or tg_config.get('master_id', 0)
+            try:
+                tg_master = int(tg_master_raw)
+            except (TypeError, ValueError):
+                tg_master = 0
             if tg_token and tg_master:
                 from communication.telegram_bot import TelegramBot
                 self.telegram = TelegramBot(self, tg_token, tg_master)
                 telegram_task = asyncio.create_task(self.telegram.start())
-                self.logger.info('Telegram bot started for master %d' % tg_master)
+                self.logger.info('Telegram bot started for master %s' % _mask_identifier(tg_master))
 
         self.logger.info(f"Dashboard: http://{dashboard_config.get('host', '127.0.0.1')}:{dashboard_config.get('port', 18802)}")
         self.logger.info("NAOMI is alive and running!")
@@ -285,15 +317,38 @@ class NAOMIAgent:
             importance=8
         )
 
+        # Start WhatsApp bot if configured
+        whatsapp_task = None
+        wa_config = self.config.get('whatsapp', {})
+        if wa_config.get('enabled'):
+            master_number = (
+                os.environ.get('WHATSAPP_MASTER_NUMBER')
+                or wa_config.get('master_number', '')
+            ).strip()
+            if master_number:
+                wa_config = {**wa_config, 'master_number': master_number}
+                from communication.whatsapp_bot import WhatsAppBot
+                self.whatsapp = WhatsAppBot(self, wa_config)
+                whatsapp_task = asyncio.create_task(self.whatsapp.start())
+                self.logger.info('WhatsApp bot started for master %s' % _mask_identifier(master_number))
+            else:
+                self.logger.warning('WhatsApp enabled but WHATSAPP_MASTER_NUMBER is not set')
+
         # Wait for shutdown
+        tasks = [heartbeat_task, dashboard_task]
+        if telegram_task:
+            tasks.append(telegram_task)
+        if whatsapp_task:
+            tasks.append(whatsapp_task)
         try:
-            tasks = [heartbeat_task, dashboard_task]
-            if telegram_task:
-                tasks.append(telegram_task)
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             self.logger.info("Shutdown signal received")
             self.heartbeat.stop()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     def shutdown(self):
         """Graceful shutdown."""
@@ -301,6 +356,35 @@ class NAOMIAgent:
         self.heartbeat.stop()
         self.memory.close()
         self.logger.info("Goodbye.")
+
+
+async def _run_with_signals(agent: NAOMIAgent):
+    loop = asyncio.get_running_loop()
+    run_task = asyncio.create_task(agent.run())
+
+    def request_shutdown():
+        if run_task.done():
+            return
+        agent.logger.info("Shutdown requested")
+        agent.heartbeat.stop()
+        run_task.cancel()
+
+    installed_handlers = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, request_shutdown)
+            installed_handlers.append(sig)
+        except NotImplementedError:
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(request_shutdown))
+
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for sig in installed_handlers:
+            loop.remove_signal_handler(sig)
+        agent.shutdown()
 
 
 def main():
@@ -311,17 +395,9 @@ def main():
 
     agent = NAOMIAgent()
 
-    # Handle graceful shutdown
-    def signal_handler(sig, frame):
-        agent.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
     # Run the agent
     try:
-        asyncio.run(agent.run())
+        asyncio.run(_run_with_signals(agent))
     except KeyboardInterrupt:
         agent.shutdown()
 

@@ -9,9 +9,15 @@ import time
 import os
 import logging
 import httpx
-from typing import Optional
 
 logger = logging.getLogger("naomi.telegram")
+
+
+def _mask_identifier(value) -> str:
+    text = str(value or "")
+    if len(text) <= 4:
+        return "***"
+    return "***" + text[-4:]
 
 
 class TelegramBot:
@@ -32,7 +38,7 @@ class TelegramBot:
     async def start(self):
         """Start polling for Telegram messages."""
         self.running = True
-        logger.info(f"Telegram bot started, master ID: {self.master_id}")
+        logger.info("Telegram bot started, master ID: %s", _mask_identifier(self.master_id))
 
         # Send startup message
         await self.send_message("NAOMI Agent is online and ready.")
@@ -43,7 +49,6 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Telegram poll error: {e}")
                 await asyncio.sleep(5)
-            await asyncio.sleep(1)
 
     async def _poll(self):
         """Poll for new messages and reactions."""
@@ -92,6 +97,13 @@ class TelegramBot:
             text = await self._transcribe_voice(chat_id, voice)
             if not text:
                 return  # Transcription failed, error already sent
+
+        # Handle photo messages
+        photo_list = message.get("photo")
+        if photo_list:
+            caption = message.get("caption", "")
+            await self._handle_photo(chat_id, photo_list, prompt=caption or text or "")
+            return
 
         if not text:
             return
@@ -730,7 +742,13 @@ class TelegramBot:
                 return
             await self._send(chat_id, "Thinking...")
             await self._send_typing(chat_id)
-            response = self.agent.brain.think(args)
+            response = await self._run_blocking_with_notice(
+                chat_id,
+                self.agent.brain.think,
+                args,
+                notice_after=20,
+                notice="正在思考，稍等一下。",
+            )
             await self._send(chat_id, f"NAOMI thinks:\n\n{response[:3500]}")
 
         elif cmd == "/search":
@@ -1437,6 +1455,17 @@ class TelegramBot:
             )
         self._last_response_time = 0
 
+
+    def _model_tag(self):
+        brain = self.agent.brain
+        model = getattr(brain, "_last_model", "") or "?"
+        tokens = getattr(brain, "_last_tokens", 0)
+        if tokens >= 1000:
+            t = f"~{tokens/1000:.1f}k"
+        else:
+            t = f"~{tokens}"
+        return "\n\n" + f"_({model} \u00b7 {t} tokens)_"
+
     async def _handle_message(self, chat_id: int, text: str):
         """Detect if message is chat or task, respond accordingly."""
 
@@ -1446,7 +1475,6 @@ class TelegramBot:
         # YUMIKO mode: same capabilities but all local models
         if self.agent.brain._private_mode:
             persona_name = "yumiko"
-            session_id = self._get_session_id(persona_name)
             complexity = self.agent.brain._classify_complexity(text)
 
             if complexity in ("private", "chat"):
@@ -1454,7 +1482,7 @@ class TelegramBot:
                 await self._send_typing(chat_id)
 
                 recent_convs = self.agent.memory.get_conversations(
-                    limit=20, persona=persona_name, session_id=session_id
+                    limit=20, persona=persona_name
                 )
                 conv_history = ""
                 if recent_convs:
@@ -1466,35 +1494,36 @@ class TelegramBot:
                 if conv_history:
                     persona += "\n\nRecent conversation:\n" + conv_history
 
-                response = self.agent.brain.think_smart(text, persona)
+                response = await self._run_blocking_with_notice(
+                    chat_id,
+                    self.agent.brain.think_smart,
+                    text,
+                    persona,
+                    channel="telegram",
+                    notice_after=20,
+                    notice="本機模型還在回應，我會繼續等；如果逾時會切到下一個可用模型。",
+                )
                 if not response or not response.strip():
                     response = "（Ollama 無回應，請確認 Ollama 是否在運行）"
                     logger.warning("YUMIKO returned empty response")
-                self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
-                self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
+                self.agent.memory.log_conversation("user", text, persona=persona_name)
+                self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name)
                 self._last_response_len = len(response)
                 self._last_response_time = time.time()
-                await self._send(chat_id, response[:3500])
+                await self._send(chat_id, response[:3400] + self._model_tag(), parse_mode="Markdown")
             else:
                 logger.info("YUMIKO mode: task → local agent loop")
-                self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
+                self.agent.memory.log_conversation("user", text, persona=persona_name)
                 await self._handle_task_private(chat_id, text)
             return
 
         # NAOMI mode
         persona_name = "naomi"
-        session_id = self._get_session_id(persona_name)
 
-        classify_prompt = (
-            "Classify this message as CHAT or TASK. "
-            "CHAT = greeting, question, conversation, asking about yourself/feelings. "
-            "TASK = requesting action, search, code, build, install, create. "
-            "Reply with ONLY one word: CHAT or TASK\n\n"
-            f"Message: {text}"
-        )
+        # Fast keyword-based classification (0ms vs 21s LLM call)
         await self._send_typing(chat_id)
-        classification = self.agent.brain._call_fast(classify_prompt).strip().upper()
-        is_chat = "CHAT" in classification
+        complexity = self.agent.brain._classify_complexity(text)
+        is_chat = complexity in ("chat", "private")
         logger.info(f"Message classified as: {'CHAT' if is_chat else 'TASK'}")
 
         if is_chat:
@@ -1517,7 +1546,7 @@ class TelegramBot:
 
             # Multi-turn context: session-scoped conversation history
             recent_convs = self.agent.memory.get_conversations(
-                limit=30, persona=persona_name, session_id=session_id
+                limit=30, persona=persona_name
             )
             conv_history = ""
             if recent_convs:
@@ -1559,12 +1588,29 @@ class TelegramBot:
                 except Exception as e:
                     logger.debug("Knowledge graph query error: %s", e)
 
-            response = self.agent.brain.think_smart(text, persona_prompt)
-            self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
-            self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name, session_id=session_id)
+            # Call brain with typing indicator
+            typing_task = asyncio.create_task(self._typing_loop(chat_id))
+            try:
+                response = await self._run_blocking_with_notice(
+                    chat_id,
+                    self.agent.brain.think_smart,
+                    text,
+                    persona_prompt,
+                    channel="telegram",
+                    notice_after=20,
+                    notice="GPT-5.4 還在回應，我會繼續等；如果逾時會自動切到下一個可用模型。",
+                )
+            finally:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+            self.agent.memory.log_conversation("user", text, persona=persona_name)
+            self.agent.memory.log_conversation(persona_name, response[:500], persona=persona_name)
             self._last_response_len = len(response)
             self._last_response_time = time.time()
-            await self._send(chat_id, response[:3500])
+            await self._send(chat_id, response[:3400] + self._model_tag(), parse_mode="Markdown")
 
             # Store conversation in vector memory for future recall
             if hasattr(self.agent, 'vector_memory') and self.agent.vector_memory:
@@ -1581,7 +1627,10 @@ class TelegramBot:
                 asyncio.create_task(
                     self.agent.memory_agent.on_conversation_turn(text, response)
                 )
-            asyncio.create_task(self._learn_from_chat(chat_id, text, response))
+            # Learn every 5 messages to save API quota
+            self._chat_count = getattr(self, '_chat_count', 0) + 1
+            if self._chat_count % 5 == 0:
+                asyncio.create_task(self._learn_from_chat(chat_id, text, response))
 
             # v1.3: TTS voice reply if voice mode is on
             if getattr(self, '_voice_mode', False):
@@ -1616,14 +1665,24 @@ class TelegramBot:
                 "Use tools to complete the task. Respond in Traditional Chinese."
             )
 
-            # Use Ollama for the agent loop
-            result = await self.agent.brain._agent_loop_ollama(
-                task=text, executor=self.agent.actions,
-                system_prompt=system, model=code_model,
-            )
-
-            typing_active = False
-            typing_task.cancel()
+            try:
+                # Use Ollama for the agent loop
+                result = await self._await_with_notice(
+                    chat_id,
+                    self.agent.brain._agent_loop_ollama(
+                        task=text, executor=self.agent.actions,
+                        system_prompt=system, model=code_model,
+                    ),
+                    notice_after=45,
+                    notice="本地任務仍在執行，完成後會回報。",
+                )
+            finally:
+                typing_active = False
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
 
             # Send result
             final = result.get("result", "")
@@ -1654,8 +1713,7 @@ class TelegramBot:
         """Execute task directly via agent loop with streaming progress to Telegram."""
         await self._send(chat_id, "收到，正在執行...")
         persona_name = "yumiko" if self.agent.brain._private_mode else "naomi"
-        session_id = self._get_session_id(persona_name)
-        self.agent.memory.log_conversation("user", text, persona=persona_name, session_id=session_id)
+        self.agent.memory.log_conversation("user", text, persona=persona_name)
 
         context = self.agent.memory.build_context(query=text)
         system = (
@@ -1678,17 +1736,26 @@ class TelegramBot:
 
             typing_task = asyncio.create_task(keep_typing())
 
-            # Run agent loop
-            result = await self.agent.brain.agent_loop(
-                task=text,
-                executor=self.agent.actions,
-                system_prompt=system,
-                max_iterations=15,
-            )
-
-            # Stop typing indicator
-            typing_active = False
-            typing_task.cancel()
+            try:
+                # Run agent loop
+                result = await self._await_with_notice(
+                    chat_id,
+                    self.agent.brain.agent_loop(
+                        task=text,
+                        executor=self.agent.actions,
+                        system_prompt=system,
+                        max_iterations=15,
+                    ),
+                    notice_after=45,
+                    notice="任務仍在執行，可能正在等 CLI 或工具回應；完成後會回報。",
+                )
+            finally:
+                typing_active = False
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
 
             # Stream progress: show each step
             steps = result.get("steps", [])
@@ -1710,7 +1777,13 @@ class TelegramBot:
                         f"Task: {text}\nResult: {final[:2000]}"
                     )
                     await self._send_typing(chat_id)
-                    summary = self.agent.brain._think(summary_prompt)
+                    summary = await self._run_blocking_with_notice(
+                        chat_id,
+                        self.agent.brain._think,
+                        summary_prompt,
+                        notice_after=15,
+                        notice="正在整理結果，稍等一下。",
+                    )
                     await self._send(chat_id, summary[:3500])
                 else:
                     await self._send(chat_id, final[:3500])
@@ -1730,7 +1803,7 @@ class TelegramBot:
                         logger.debug(f"Failed to send image {img_path}: {img_err}")
 
             self.agent.memory.log_conversation("naomi", str(result.get("result", ""))[:500],
-                                               persona=persona_name, session_id=session_id)
+                                               persona=persona_name)
             self.agent.memory.remember_long(
                 f"Task: {text[:100]}", str(result)[:1000],
                 category="task_result", importance=7,
@@ -1914,8 +1987,63 @@ class TelegramBot:
         except Exception:
             pass
 
-    async def _send(self, chat_id: int, text: str):
-        """Send a message to Telegram."""
+    async def _run_blocking_with_notice(
+        self,
+        chat_id: int,
+        func,
+        *args,
+        notice_after: int = 20,
+        repeat_after: int = 45,
+        notice: str = "",
+        **kwargs,
+    ):
+        """Run blocking model calls without freezing Telegram updates."""
+        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        notice_sent = False
+        while True:
+            try:
+                wait_for = repeat_after if notice_sent else notice_after
+                return await asyncio.wait_for(asyncio.shield(task), timeout=wait_for)
+            except asyncio.TimeoutError:
+                if notice and not notice_sent:
+                    await self._send(chat_id, notice)
+                    notice_sent = True
+                else:
+                    await self._send_typing(chat_id)
+
+    async def _await_with_notice(
+        self,
+        chat_id: int,
+        awaitable,
+        notice_after: int = 45,
+        repeat_after: int = 60,
+        notice: str = "",
+    ):
+        """Await a long async job and send a visible progress note if it stalls."""
+        task = asyncio.create_task(awaitable)
+        notice_sent = False
+        while True:
+            try:
+                wait_for = repeat_after if notice_sent else notice_after
+                return await asyncio.wait_for(asyncio.shield(task), timeout=wait_for)
+            except asyncio.TimeoutError:
+                if notice and not notice_sent:
+                    await self._send(chat_id, notice)
+                    notice_sent = True
+                else:
+                    await self._send_typing(chat_id)
+
+    async def _typing_loop(self, chat_id: int):
+        """Keep sending typing indicator every 4 seconds until cancelled."""
+        try:
+            while True:
+                await self._send_typing(chat_id)
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+
+    async def _send(self, chat_id: int, text: str, parse_mode: str = ""):
+        """Send a message to Telegram. Falls back to plain text on Markdown parse error."""
         if not text or not text.strip():
             logger.warning("Attempted to send empty message, skipping")
             return
@@ -1927,8 +2055,15 @@ class TelegramBot:
             try:
                 resp = await self.client.post(
                     f"{self.base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": chunk, "parse_mode": ""},
+                    json={"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode or ""},
                 )
+                if resp.status_code == 400 and parse_mode:
+                    # Markdown parse error — retry without parse_mode
+                    logger.warning("Telegram Markdown parse error, retrying as plain text")
+                    resp = await self.client.post(
+                        f"{self.base_url}/sendMessage",
+                        json={"chat_id": chat_id, "text": chunk, "parse_mode": ""},
+                    )
                 if resp.status_code != 200:
                     logger.error("Telegram send HTTP %d: %s", resp.status_code, resp.text[:200])
             except Exception as e:

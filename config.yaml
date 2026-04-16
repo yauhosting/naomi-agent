@@ -1,20 +1,22 @@
 # NAOMI Agent Configuration
 agent:
   name: "NAOMI"
-  version: "0.5.0"
+  version: "0.5.1"
   description: "Autonomous AI Agent - Digital Life Form"
 
 brain:
-  # Primary: Claude CLI via proxy (OpenClaw style) — uses Max subscription
+  # Smart routing with multi-tier fallback:
+  #   Chat:  Codex GPT-5.4 → MiniMax M2.7 → Ollama → GLM → Claude CLI
+  #   Code:  Claude CLI → Codex GPT-5.4 → MiniMax M2.7 → GLM 5.1 → Ollama OmniCoder
   primary:
     type: "claude_proxy"
-    model: "claude-sonnet-4-6"     # Sonnet for daily tasks (fast + capable)
+    model: "claude-sonnet-4-6"
+    cli_model: "opus"
     proxy_url: "http://127.0.0.1:18790/v1/chat/completions"
-    timeout: 120
-  # Fallback: MiniMax 2.7 API
+    timeout: 180
   fallback:
     type: "minimax"
-    api_key: ""  # Set via environment variable MINIMAX_API_KEY
+    api_key: ""  # via MINIMAX_API_KEY env
     model: "MiniMax-M2.7"
     base_url: "https://api.minimax.io/anthropic/v1"
 
@@ -72,4 +74,12 @@ tts:
 
 telegram:
   enabled: true
-  master_id: 5197390147
+  # Set TELEGRAM_MASTER_ID in .env for the authorized user ID.
+  master_id: 0
+
+whatsapp:
+  enabled: true
+  # Set WHATSAPP_MASTER_NUMBER in .env, without chat suffixes.
+  master_number: ""
+  bridge_url: "http://127.0.0.1:18804"
+  webhook_port: 18803

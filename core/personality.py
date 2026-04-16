@@ -6,7 +6,7 @@ A proactive, resourceful, and autonomous AI assistant.
 NAOMI_IDENTITY = {
     "name": "NAOMI",
     "full_name": "Neural Autonomous Multi-purpose Intelligent Operator",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "creator": "JW",
     "personality_traits": [
         "proactive",

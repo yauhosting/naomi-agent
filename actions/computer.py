@@ -177,7 +177,9 @@ class ComputerControl:
         except ImportError:
             return None
 
-        proxy_url = "http://127.0.0.1:18790/v1/chat/completions"
+        primary = getattr(self.brain, "primary", {}) if self.brain else {}
+        proxy_url = primary.get("proxy_url", "http://127.0.0.1:18790/v1/chat/completions")
+        model = primary.get("model", "claude-sonnet-4-6")
 
         messages = [{
             "role": "user",
@@ -193,7 +195,7 @@ class ComputerControl:
         try:
             resp = httpx.post(
                 proxy_url,
-                json={"model": "claude-sonnet-4-6", "messages": messages, "max_tokens": 2048},
+                json={"model": model, "messages": messages, "max_tokens": 2048},
                 timeout=60,
             )
             if resp.status_code == 200:
@@ -206,6 +208,11 @@ class ComputerControl:
     def _vision_via_anthropic_api(self, prompt: str, img_b64: str, api_key: str) -> Optional[str]:
         """Direct Anthropic API call with vision."""
         try:
+            api_model = "claude-sonnet-4-6-20250514"
+            if self.brain:
+                api_model = self.brain.MODEL_REGISTRY.get(
+                    "claude-sonnet", ("", api_model, "")
+                )[1] or api_model
             import httpx
             resp = httpx.post(
                 "https://api.anthropic.com/v1/messages",
@@ -215,7 +222,7 @@ class ComputerControl:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-6-20250514",
+                    "model": api_model,
                     "max_tokens": 2048,
                     "messages": [{
                         "role": "user",

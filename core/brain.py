@@ -270,6 +270,10 @@ class Brain:
         self.fallback = config.get("fallback", {})
         self._claude_available = None
         self._claude_cli_path = None
+        self._claude_cli_model = (
+            self.primary.get("cli_model")
+            or os.environ.get("NAOMI_CLAUDE_CLI_MODEL", "")
+        ).strip()
         self._codex_cli_path = self._find_codex_cli()
         self._active_mode = "auto"
         self._anthropic_client = None
@@ -285,6 +289,10 @@ class Brain:
 
         # Usage tracking
         self._usage = {"total_calls": 0, "by_backend": {}, "errors": 0, "start_time": time.time()}
+
+        # Last response metadata (for UI display)
+        self._last_model = ""
+        self._last_tokens = 0
 
         # Load .env
         load_dotenv()
@@ -421,14 +429,86 @@ class Brain:
                 except OSError:
                     pass
 
-        images = [{"data": img_data, "media_type": "image/png"}]
-        response = self.call_anthropic(prompt, images=images, model=model)
+        ext = image_path.lower().rsplit(".", 1)[-1] if "." in image_path else "png"
+        media_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
+        media_type = media_map.get(ext, "image/png")
 
-        if response:
-            for block in response.content:
-                if block.type == "text":
-                    return block.text
-        return "[Vision failed]"
+        # 1. MiniMax vision (tool_use trick)
+        if self._minimax_key and self._is_backend_available("minimax"):
+            result = self.vision_minimax(prompt, img_data, media_type)
+            if result:
+                logger.info("Vision: MiniMax tool_use success")
+                return result
+
+        # 2. Anthropic Vision
+        if self._anthropic_key or self._check_claude_cli():
+            images = [{"data": img_data, "media_type": media_type}]
+            response = self.call_anthropic(prompt, images=images, model=model)
+            if response:
+                for block in response.content:
+                    if block.type == "text":
+                        self._last_model = "Claude-Vision"
+                        self._last_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(block.text)
+                        return block.text
+
+        # 3. Ollama Gemma 4 (local vision)
+        if self._is_backend_available("ollama"):
+            try:
+                import httpx
+                body = {"model": "gemma4-uncensored:latest", "prompt": prompt, "images": [img_data], "stream": False}
+                resp = httpx.post("http://localhost:11434/api/generate", json=body, timeout=120)
+                if resp.status_code == 200:
+                    text = resp.json().get("response", "")
+                    if text:
+                        self._last_model = "Gemma4-Vision"
+                        self._last_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(text)
+                        return text
+            except Exception as e:
+                logger.warning("Ollama vision error: %s", e)
+
+        return "[Vision: all backends failed]"
+
+
+    def vision_minimax(self, prompt, image_base64, media_type="image/png"):
+        """Analyze image via MiniMax tool_use pathway (the secret trick)."""
+        import httpx
+        if not self._minimax_key:
+            return ""
+        base_url = self.fallback.get("base_url", "https://api.minimax.io/anthropic/v1")
+        model = self.fallback.get("model", "MiniMax-M2.7")
+        tool_use_id = f"toolu_vision_{int(time.time())}"
+        try:
+            headers = {"x-api-key": self._minimax_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+            body = {
+                "model": model, "max_tokens": 4096,
+                "system": "You are NAOMI, an AI with vision. Describe images in detail. Respond in Traditional Chinese.",
+                "messages": [
+                    {"role": "user", "content": prompt or "Describe this image in detail."},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id, "name": "understand_image", "input": {"request": prompt or "Describe this image"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": [{"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_base64}}]}]}
+                ],
+                "tools": [{"name": "understand_image", "description": "Analyze image content", "input_schema": {"type": "object", "properties": {"request": {"type": "string"}}, "required": ["request"]}}]
+            }
+            resp = None
+            for attempt in range(3):
+                resp = httpx.post(f"{base_url}/messages", headers=headers, json=body, timeout=120)
+                if resp.status_code == 200: break
+                if resp.status_code in (429, 529): time.sleep((attempt+1)*5)
+                else: break
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                content = data.get("content", [])
+                if content and isinstance(content, list):
+                    text = next((c.get("text","") for c in content if c.get("type")=="text"), "")
+                    if text:
+                        self._last_model = "MiniMax-Vision"
+                        self._last_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(text) + int(len(image_base64)*0.5/1.5)
+                        return text
+            logger.warning("MiniMax vision failed: %s", resp.status_code if resp else "no resp")
+            return ""
+        except Exception as e:
+            logger.error("MiniMax vision error: %s", e)
+            return ""
 
     # === Agent Loop with Tool Use ===
 
@@ -445,9 +525,39 @@ class Brain:
 
         Returns: {"success": bool, "result": str, "steps": [...], "verified": True}
         """
+        # Route to the correct agent loop based on active mode
+        mode = self._active_mode
+
+        # Ollama/local models → use JSON-based tool loop
+        if mode in ("ollama", "ollama-gemma", "ollama-gemma4b", "ollama-gemma31b",
+                     "ollama-glm", "ollama-dolphin", "ollama-coder"):
+            return await self._agent_loop_ollama(task, executor, system_prompt, max_iterations)
+
+        # OpenAI models explicitly selected → Codex CLI directly (no Claude)
+        if mode in ("openai", "openai-mini", "openai-o3"):
+            import asyncio as _aio
+            sys = system_prompt or (
+                "You are NAOMI, an autonomous AI agent on macOS. "
+                "Execute the task using your tools. Report real results. "
+                "Respond in Traditional Chinese."
+            )
+            response = await _aio.to_thread(
+                lambda: self._call_codex_cli_task(task, sys),
+            )
+            if response:
+                return {"success": True, "result": response[:2000],
+                        "steps": [{"tool": "codex_cli", "result": response[:500], "success": True}],
+                        "verified": True}
+            return {"success": False, "result": "Codex CLI returned no response",
+                    "steps": [], "verified": False}
+
+        # GLM/MiniMax selected → text-based task execution
+        if mode in ("glm", "glm-turbo", "minimax"):
+            return await self._agent_loop_ollama(task, executor, system_prompt, max_iterations)
+
+        # Claude or Auto → try API first, then CLI chain
         client = self._get_anthropic_client()
         if not client:
-            # No API key — use CLI-based agent loop with structured JSON
             return await self._agent_loop_cli(task, executor, system_prompt, max_iterations)
 
         model = self.MODEL_REGISTRY.get(
@@ -715,16 +825,45 @@ class Brain:
 
         logger.info(f"CLI agent loop: {task[:100]}")
 
-        # Run blocking CLI call in thread executor to not block event loop
         import asyncio as _aio
-        loop = _aio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._call_claude_cli(task, system_prompt=sys, json_schema=result_schema),
-        )
+        response = None
 
-        if not response:
-            return {"success": False, "result": "CLI returned no response",
+        # Try 1: Claude CLI
+        if self._check_claude_cli():
+            response = await _aio.to_thread(
+                lambda: self._call_claude_cli(task, system_prompt=sys, json_schema=result_schema),
+            )
+
+        # Try 2: Codex CLI (GPT-5.4) — if Claude failed
+        if not response and self._codex_cli_path:
+            logger.info("Claude CLI failed → trying Codex CLI (GPT-5.4)")
+            response = await _aio.to_thread(
+                lambda: self._call_codex_cli_task(task, sys),
+            )
+
+        # Try 3: GLM
+        if not response and self._glm_key and self._is_backend_available("glm"):
+            logger.info("Codex CLI failed → trying GLM")
+            response = await _aio.to_thread(
+                lambda: self._call_glm(f"Execute this task and report results:\n{task}", sys),
+            )
+
+        # Try 4: MiniMax
+        if not response and self._minimax_key and self._is_backend_available("minimax"):
+            logger.info("GLM failed → trying MiniMax")
+            response = await _aio.to_thread(
+                lambda: self._call_minimax(f"Execute this task and report results:\n{task}", sys),
+            )
+
+        # Try 5: Ollama (local)
+        if not response and self._is_backend_available("ollama"):
+            logger.info("Cloud backends failed → trying Ollama")
+            response = await _aio.to_thread(
+                lambda: self._call_ollama(f"Execute this task and report results:\n{task}", sys),
+            )
+
+        if not response or response.startswith("[Brain"):
+            return {"success": False, "result": "All backends failed to respond",
                     "steps": [], "verified": False}
 
         # Parse the structured response
@@ -757,6 +896,58 @@ class Brain:
             "iterations": 1,
             "verified": True,
         }
+
+    def _call_codex_cli_task(self, task: str, system_prompt: str = "") -> Optional[str]:
+        """Run a task via Codex CLI (GPT-5.4). Returns text response or None."""
+        if not self._codex_cli_path:
+            return None
+
+        full_prompt = task
+        if system_prompt:
+            full_prompt = f"[System: {system_prompt}]\n\n{task}"
+
+        try:
+            result = subprocess.run(
+                [self._codex_cli_path, "exec",
+                 "-c", 'model="gpt-5.4"',
+                 full_prompt],
+                capture_output=True, text=True, timeout=180,
+                cwd=os.path.dirname(os.path.dirname(__file__)),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split("\n")
+                # Extract content between "codex" marker and "tokens used"
+                content_lines = []
+                capture = False
+                for line in lines:
+                    if line.strip() == "codex":
+                        capture = True
+                        content_lines = []
+                        continue
+                    if "tokens used" in line.lower():
+                        break
+                    if capture:
+                        content_lines.append(line)
+
+                response = "\n".join(content_lines).strip()
+                if response:
+                    self._record_success("openai")
+                    return response
+
+                # Fallback: last substantive line
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line and not line.startswith("tokens") and line != "codex":
+                        self._record_success("openai")
+                        return line
+            logger.warning("Codex CLI task returned no useful output")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("Codex CLI task timed out (180s)")
+            return None
+        except Exception as e:
+            logger.error("Codex CLI task failed: %s", e)
+            return None
 
     async def _execute_tool(self, executor, tool_name: str, tool_input: dict) -> Dict[str, Any]:
         """Execute a tool call from the agent loop."""
@@ -902,6 +1093,79 @@ class Brain:
         except Exception as e:
             return f"[Brain error: {e}]"
 
+
+    async def stream_chat(self, prompt, system_prompt="", channel="telegram"):
+        """Async generator that yields text chunks from the fastest available backend.
+        Used for streaming responses to Telegram/WhatsApp.
+        Falls back to non-streaming if streaming not supported.
+        """
+        import httpx
+
+        # Determine model based on channel
+        use_minimax = True
+        if channel == "whatsapp":
+            # WhatsApp: try Codex/Claude first, but stream via MiniMax if they fail
+            if self._codex_cli_path and self._is_backend_available("openai"):
+                # Codex CLI doesn't support streaming easily, fall through to MiniMax
+                pass
+
+        # Try MiniMax streaming (Anthropic-compatible SSE)
+        if use_minimax and self._minimax_key and self._is_backend_available("minimax"):
+            base_url = self.fallback.get("base_url", "https://api.minimax.io/anthropic/v1")
+            model = self.fallback.get("model", "MiniMax-M2.7")
+            headers = {
+                "x-api-key": self._minimax_key,
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            }
+            body = {
+                "model": model, "max_tokens": 4096, "stream": True,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if system_prompt:
+                body["system"] = system_prompt
+
+            try:
+                async with httpx.AsyncClient(timeout=90) as client:
+                    async with client.stream("POST", f"{base_url}/messages",
+                                             headers=headers, json=body) as resp:
+                        if resp.status_code != 200:
+                            # Fall back to non-streaming
+                            result = self._call_minimax(prompt, system_prompt)
+                            if result and not result.startswith("[Brain"):
+                                self._tag_response(result, "MiniMax-M2.7", prompt)
+                                yield result
+                            return
+
+                        full_text = ""
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                import json
+                                data = json.loads(data_str)
+                                # Anthropic SSE format
+                                if data.get("type") == "content_block_delta":
+                                    delta = data.get("delta", {})
+                                    text = delta.get("text", "")
+                                    if text:
+                                        full_text += text
+                                        yield text
+                            except (json.JSONDecodeError, KeyError):
+                                continue
+
+                        self._tag_response(full_text, "MiniMax-M2.7", prompt)
+                        return
+            except Exception as e:
+                logger.warning("MiniMax streaming error: %s, falling back", e)
+
+        # Fallback: non-streaming (yield entire response at once)
+        result = self.think_smart(prompt, system_prompt, channel=channel)
+        yield result
+
     def _call_ollama(self, prompt: str, system_prompt: str = "",
                      model: str = None) -> str:
         """Call Ollama local LLM (OpenAI-compatible API at localhost:11434)."""
@@ -985,7 +1249,7 @@ class Brain:
             return None
 
     def _call_openai(self, prompt: str, system_prompt: str = "",
-                     model: str = None) -> str:
+                     model: str = None, timeout: int = None) -> str:
         """Call OpenAI via Codex CLI (uses ChatGPT subscription, no API key needed).
 
         Falls back to OpenAI API if OPENAI_API_KEY is set and Codex CLI is unavailable.
@@ -993,6 +1257,7 @@ class Brain:
         model = model or self.MODEL_REGISTRY.get(self._active_mode, ("", "gpt-5.4", ""))[1]
         if not model or not any(model.startswith(p) for p in ("gpt", "o3", "o4")):
             model = "gpt-5.4"
+        call_timeout = timeout or 120
 
         # Combine system prompt and user prompt for CLI
         full_prompt = prompt
@@ -1006,7 +1271,7 @@ class Brain:
                     [self._codex_cli_path, "exec",
                      "-c", f'model="{model}"',
                      full_prompt],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, timeout=call_timeout,
                     cwd=os.path.dirname(os.path.dirname(__file__)),
                 )
                 if result.returncode == 0 and result.stdout.strip():
@@ -1038,7 +1303,7 @@ class Brain:
 
                 logger.warning("Codex CLI returned no useful output")
             except subprocess.TimeoutExpired:
-                logger.warning("Codex CLI timed out (120s)")
+                logger.warning("Codex CLI timed out (%ss)", call_timeout)
             except Exception as e:
                 logger.warning("Codex CLI failed: %s", e)
 
@@ -1057,7 +1322,7 @@ class Brain:
                         "Content-Type": "application/json",
                     },
                     json={"model": model, "messages": messages, "max_tokens": 4096},
-                    timeout=120,
+                    timeout=call_timeout,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -1099,19 +1364,43 @@ class Brain:
                 return None
 
         cmd = [self._claude_cli_path, "-p"]
+        if self._claude_cli_model:
+            cmd.extend(["--model", self._claude_cli_model])
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
         if json_schema:
             cmd.extend(["--json-schema", json.dumps(json_schema), "--output-format", "json"])
 
         try:
+            env = {**os.environ, "LANG": "en_US.UTF-8"}
             result = subprocess.run(
                 cmd + [prompt],
                 capture_output=True, text=True,
-                timeout=self.primary.get("timeout", 120),
-                env={**os.environ, "LANG": "en_US.UTF-8"},
+                timeout=self.primary.get("timeout", 180),
+                env=env,
                 cwd="/tmp",
             )
+
+            if result.returncode != 0 and self._claude_cli_model:
+                error_text = (result.stderr or result.stdout or "").strip()
+                logger.warning(
+                    "Claude CLI model '%s' failed, retrying with CLI default: %s",
+                    self._claude_cli_model,
+                    error_text[:200],
+                )
+                fallback_cmd = [self._claude_cli_path, "-p"]
+                if system_prompt:
+                    fallback_cmd.extend(["--system-prompt", system_prompt])
+                if json_schema:
+                    fallback_cmd.extend(["--json-schema", json.dumps(json_schema), "--output-format", "json"])
+                result = subprocess.run(
+                    fallback_cmd + [prompt],
+                    capture_output=True, text=True,
+                    timeout=self.primary.get("timeout", 180),
+                    env=env,
+                    cwd="/tmp",
+                )
+
             output = result.stdout.strip()
             if result.returncode == 0 and output and "Not logged in" not in output:
                 self._record_success("cli")
@@ -1289,9 +1578,7 @@ class Brain:
             if self._check_claude_cli():
                 result = self._call_claude_cli(prompt, system_prompt)
                 if result and "Not logged in" not in result:
-                    self._record_success("cli")
                     return result
-                self._record_failure("cli")
 
         # Fallback: Claude proxy
         if self._active_mode == "auto" and self._is_backend_available("proxy"):
@@ -1300,6 +1587,22 @@ class Brain:
                 self._record_success("proxy")
                 return result
             self._record_failure("proxy")
+
+        # Fallback: OpenAI GPT-5.4 (Codex CLI — free via ChatGPT subscription)
+        if self._active_mode in ("auto", "openai", "openai-mini", "openai-o3") and self._is_backend_available("openai"):
+            if self._openai_key or self._codex_cli_path:
+                result = self._call_openai(prompt, system_prompt)
+                if result:
+                    return result
+
+        # Fallback: MiniMax
+        if self._active_mode in ("auto", "minimax") and self._is_backend_available("minimax"):
+            if self._minimax_key:
+                result = self._call_minimax(prompt, system_prompt)
+                if result and not result.startswith("[Brain"):
+                    self._record_success("minimax")
+                    return result
+                self._record_failure("minimax")
 
         # Fallback: Ollama (local, free)
         if self._active_mode in ("auto", "ollama", "ollama-gemma", "ollama-gemma4b",
@@ -1316,30 +1619,31 @@ class Brain:
                 if result:
                     return result
 
-        # Fallback: OpenAI (GPT-5.4)
-        if self._active_mode in ("auto", "openai", "openai-mini", "openai-o3") and self._is_backend_available("openai"):
-            if self._openai_key:
-                result = self._call_openai(prompt, system_prompt)
-                if result:
-                    return result
-
-        # Fallback: MiniMax
-        if self._active_mode in ("auto", "minimax") and self._is_backend_available("minimax"):
-            if self._minimax_key:
-                result = self._call_minimax(prompt, system_prompt)
-                if result and not result.startswith("[Brain"):
-                    self._record_success("minimax")
-                    return result
-                self._record_failure("minimax")
-
         return "[Brain offline: No backend available]"
 
-    def _call_fast(self, prompt: str, system_prompt: str = "") -> str:
-        """Quick LLM call for classification/lightweight tasks.
 
-        Alias for _think — restored after self-evolution accidentally
-        removed it, breaking Telegram bot message handling.
-        """
+    def _estimate_tokens(self, text):
+        if not text: return 0
+        return max(1, int(len(text) / 1.5))
+
+    def _tag_response(self, response, model, prompt=""):
+        self._last_model = model
+        self._last_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(response)
+        return response
+
+    def _call_fast(self, prompt: str, system_prompt: str = "") -> str:
+        """Quick LLM call — uses fastest available backend directly."""
+        # 1. MiniMax (fastest cloud, ~2.8s)
+        if self._minimax_key and self._is_backend_available("minimax"):
+            result = self._call_minimax(prompt, system_prompt)
+            if result and not result.startswith("[Brain"):
+                return result
+        # 2. Ollama (local, always available)
+        if self._is_backend_available("ollama"):
+            result = self._call_ollama(prompt, system_prompt)
+            if result:
+                return result
+        # 3. Full fallback chain
         return self._think(prompt, system_prompt)
 
     # === Smart Routing ===
@@ -1418,31 +1722,47 @@ class Brain:
         ]
 
     def _classify_complexity(self, prompt: str) -> str:
-        """Classify: chat → MiniMax, code → CLI, private → local Ollama.
-        Returns: 'chat', 'code', 'private'
-        In private mode: code still returns 'code' (→ CLI), rest returns 'private' (→ local)
+        """Classify chat vs actionable work.
+
+        Returns: 'chat', 'code', 'private'.
+        In private mode, actionable work returns 'private_code', rest returns 'private'.
         """
         prompt_lower = prompt.lower()
-        code_signals = [
+        task_signals = [
             "code", "debug", "fix", "error", "bug", "implement", "build",
             "review", "analyze", "architecture", "design", "refactor",
+            "create", "add", "setup", "install", "run", "execute", "inspect",
+            "check", "deploy", "script", "api", "server", "database", "webui",
+            "project", "entry", "route", "page", "component",
             "寫代碼", "寫程式", "程式碼", "修改代碼", "修復", "分析", "設計", "架構", "重構",
+            "幫我在", "幫我把", "幫我做", "幫我看", "幫我查", "幫我創", "幫我建",
+            "幫我修", "幫我改", "幫我加", "創建", "建立", "新增", "加一個", "加上", "擺放", "放一個",
+            "入口", "項目", "專案", "頁面", "功能", "實作", "執行", "處理",
+            "檢查", "查一下", "看看為何", "看為何", "解決", "修好", "修正",
+            "啟動", "部署", "設定", "設置", "安裝", "測試", "讀取",
             "def ", "class ", "function", "import ", "```",
             "explain this code", "what does this", "how to implement",
-            "script", "api", "server", "deploy", "database",
         ]
-        if any(sig in prompt_lower for sig in code_signals):
+        if any(sig in prompt_lower for sig in task_signals):
             return "private_code" if self._private_mode else "code"
         if len(prompt) > 500:
             return "private_code" if self._private_mode else "code"
         return "private" if self._private_mode else "chat"
 
-    def think_smart(self, prompt: str, context: str = "") -> str:
+    def think_smart(self, prompt: str, context: str = "", channel: str = "telegram") -> str:
         """Multi-track routing:
         - chat → MiniMax M2.7 (Master's preference)
         - code → Claude CLI (strongest reasoning)
         - private → local Gemma 4B (nothing leaves machine)
         """
+        # If user manually selected a model (not auto), use it directly
+        if self._active_mode != "auto" and not self._private_mode:
+            system = ("You are NAOMI, an autonomous AI agent. "
+                      "Be direct, actionable, and proactive. Respond in Traditional Chinese.")
+            full = prompt + ("\n\nContext:\n" + context if context else "")
+            result = self._think(full, system)
+            return result
+
         complexity = self._classify_complexity(prompt)
         full = prompt + (f"\n\nContext:\n{context}" if context else "")
         system = ("You are NAOMI, an autonomous AI agent. "
@@ -1471,21 +1791,136 @@ class Brain:
                 return result
             return "[Private mode: Ollama not available. Use /private off to disable.]"
 
-        # Public chat — MiniMax (Master's preference)
+        # Public chat — routing depends on channel
+        # telegram (default): GPT-5.4 → MiniMax → Ollama → GLM → Claude CLI
+        # whatsapp:           GPT-5.4 → Claude CLI → MiniMax → Ollama
         if complexity == "chat":
+            chat_openai_timeout = int(self.config.get("chat_openai_timeout", 45))
+            if channel == "whatsapp":
+                # WhatsApp order: GPT-5.4 first (faster responses)
+                # 1. Codex GPT-5.4
+                if (self._openai_key or self._codex_cli_path) and self._is_backend_available("openai"):
+                    result = self._call_openai(full, system, timeout=chat_openai_timeout)
+                    if result:
+                        logger.debug("Smart route [whatsapp]: chat → GPT-5.4")
+                        return self._tag_response(result, "GPT-5.4", full)
+
+                # 2. Claude CLI
+                if self._is_backend_available("cli") and self._check_claude_cli():
+                    result = self._call_claude_cli(full, system)
+                    if result and "Not logged in" not in result:
+                        logger.debug("Smart route [whatsapp]: chat → Claude CLI")
+                        return self._tag_response(result, "Claude-CLI", full)
+                    # Note: _call_claude_cli already records failure internally
+
+                # 3. MiniMax
+                if self._minimax_key and self._is_backend_available("minimax"):
+                    result = self._call_minimax(full, system)
+                    if result and not result.startswith("[Brain"):
+                        logger.debug("Smart route [whatsapp]: chat → MiniMax")
+                        self._record_success("minimax")
+                        return self._tag_response(result, "MiniMax-M2.7", full)
+                    self._record_failure("minimax")
+
+                # 4. Ollama (local, always available)
+                if self._is_backend_available("ollama"):
+                    result = self._call_ollama(full, system)
+                    if result:
+                        logger.debug("Smart route [whatsapp]: chat → Ollama (all cloud failed)")
+                        return self._tag_response(result, "Ollama", full)
+
+                return "[Brain offline: No backend available for chat]"
+
+            else:
+                # Telegram / default order: GPT-5.4 → MiniMax → Ollama → GLM → Claude CLI
+                # 1. GPT-5.4 (primary for chat — uses ChatGPT subscription, free)
+                if (self._openai_key or self._codex_cli_path) and self._is_backend_available("openai"):
+                    result = self._call_openai(full, system, timeout=chat_openai_timeout)
+                    if result:
+                        logger.debug("Smart route: chat → GPT-5.4")
+                        return self._tag_response(result, "GPT-5.4", full)
+
+                # 2. MiniMax M2.7
+                if self._minimax_key and self._is_backend_available("minimax"):
+                    result = self._call_minimax(full, system)
+                    if result and not result.startswith("[Brain"):
+                        logger.debug("Smart route: chat → MiniMax")
+                        self._record_success("minimax")
+                        return self._tag_response(result, "MiniMax-M2.7", full)
+                    self._record_failure("minimax")
+
+                # 3. Ollama (local, free)
+                if self._is_backend_available("ollama"):
+                    result = self._call_ollama(full, system)
+                    if result:
+                        logger.debug("Smart route: chat → Ollama")
+                        return self._tag_response(result, "Ollama", full)
+
+                # 4. GLM
+                if self._glm_key and self._is_backend_available("glm"):
+                    result = self._call_glm(full, system)
+                    if result:
+                        logger.debug("Smart route: chat → GLM")
+                        return self._tag_response(result, "GLM", full)
+
+                # 5. Claude CLI (last resort for chat — save Pro quota)
+                if self._is_backend_available("cli") and self._check_claude_cli():
+                    result = self._call_claude_cli(full, system)
+                    if result and "Not logged in" not in result:
+                        logger.debug("Smart route: chat → Claude CLI (all others failed)")
+                        return self._tag_response(result, "Claude-CLI", full)
+
+                return "[Brain offline: No backend available for chat]"
+
+        # Public code — Claude CLI → Codex GPT-5.4 → GLM 5.1 → Ollama Qwen 3.5 Coding
+        if complexity == "code":
+            # 1. Claude CLI (strongest for code)
+            if self._is_backend_available("cli") and self._check_claude_cli():
+                result = self._call_claude_cli(full, system)
+                if result and "Not logged in" not in result:
+                    logger.debug("Smart route: code → Claude CLI")
+                    return self._tag_response(result, "Claude-CLI", full)
+                # Note: _call_claude_cli already records failure internally
+
+            # 2. Codex GPT-5.4
+            if (self._openai_key or self._codex_cli_path) and self._is_backend_available("openai"):
+                result = self._call_openai(full, system)
+                if result:
+                    logger.debug("Smart route: code → GPT-5.4 (Claude failed)")
+                    return self._tag_response(result, "GPT-5.4", full)
+
+            # 3. MiniMax M2.7 (fast cloud fallback for code)
             if self._minimax_key and self._is_backend_available("minimax"):
                 result = self._call_minimax(full, system)
                 if result and not result.startswith("[Brain"):
-                    logger.debug("Smart route: chat → MiniMax")
+                    logger.debug("Smart route: code → MiniMax (CLI/GPT failed)")
                     self._record_success("minimax")
-                    return result
+                    return self._tag_response(result, "MiniMax-M2.7", full)
+                self._record_failure("minimax")
+
+            # 4. GLM 5.1
+            if self._glm_key and self._is_backend_available("glm"):
+                result = self._call_glm(full, system)
+                if result:
+                    logger.debug("Smart route: code → GLM 5.1 (MiniMax failed)")
+                    return self._tag_response(result, "GLM-5.1", full)
+                self._record_failure("glm")
+
+            # 5. Ollama Qwen 3.5 Coding
             if self._is_backend_available("ollama"):
+                coding_model = "zfujicute/OmniCoder-Qwen3.5-9B-Claude-4.6-Opus-Uncensored-v2-GGUF:latest"
+                result = self._call_ollama(full, system, model=coding_model)
+                if result:
+                    logger.debug("Smart route: code → Ollama OmniCoder (all cloud failed)")
+                    return self._tag_response(result, "OmniCoder", full)
+                # Try default ollama as last resort
                 result = self._call_ollama(full, system)
                 if result:
-                    logger.debug("Smart route: chat → Ollama (MiniMax failed)")
                     return result
 
-        # Public code — Claude CLI (strongest)
+            return "[Brain offline: No backend available for code]"
+
+        # Fallback for unknown complexity
         return self._think(full, system)
 
     # === Cross-Model Discussion ===

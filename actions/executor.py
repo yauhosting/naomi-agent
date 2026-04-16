@@ -3,11 +3,13 @@ NAOMI Agent - Action System (Hands)
 Executes commands, manages files, runs code, handles Git operations.
 """
 import os
+import asyncio
 import subprocess
 import logging
-import json
 import time
-from typing import Dict, Any, Optional
+import tempfile
+import shlex
+from typing import Dict, Any
 
 logger = logging.getLogger("naomi.actions")
 
@@ -93,7 +95,7 @@ class ActionExecutor:
                 # Log but allow (Master granted full permissions)
 
         try:
-            result = handler(params)
+            result = await asyncio.to_thread(handler, params)
 
             # Audit log every tool call
             result_summary = str(result.get("output", result.get("error", "")))[:200] if isinstance(result, dict) else str(result)[:200]
@@ -154,11 +156,20 @@ class ActionExecutor:
     def execute_python(self, code: str) -> Dict[str, Any]:
         """Execute Python code."""
         logger.info(f"Python exec: {code[:100]}")
-        # Write to temp file and execute
-        tmp_file = "/tmp/naomi_exec.py"
-        with open(tmp_file, 'w') as f:
-            f.write(code)
-        return self.execute_shell(f"python3 {tmp_file}")
+        tmp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".py", prefix="naomi_exec_", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(code)
+                tmp_file = f.name
+            return self.execute_shell(f"python3 {shlex.quote(tmp_file)}")
+        finally:
+            if tmp_file:
+                try:
+                    os.unlink(tmp_file)
+                except OSError:
+                    pass
 
     def read_file(self, path: str) -> Dict[str, Any]:
         """Read a file."""
@@ -188,7 +199,8 @@ class ActionExecutor:
             return {"error": "Format: path|||content", "success": False}
         path, content = parts
         full_path = path.strip() if os.path.isabs(path.strip()) else os.path.join(self.project_dir, path.strip())
-        with open(full_path, 'a') as f:
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, 'a', encoding='utf-8') as f:
             f.write(content)
         return {"success": True, "path": full_path}
 
@@ -427,7 +439,7 @@ class ToolManager:
         logger.info(f"Auto-installing tool: {tool_name}")
 
         # Check if it's a Python package first
-        result = self.actions.pip_install(tool_name)
+        result = await asyncio.to_thread(self.actions.pip_install, tool_name)
         if result.get("success"):
             self.available_tools[tool_name] = True
             return result
@@ -439,7 +451,7 @@ class ToolManager:
         ]
 
         for method in install_methods:
-            result = self.actions.execute_shell(method)
+            result = await asyncio.to_thread(self.actions.execute_shell, method)
             if result.get("success"):
                 self.available_tools[tool_name] = True
                 self.memory.learn_skill(
@@ -450,7 +462,7 @@ class ToolManager:
                 return result
 
         # Search the web for installation instructions
-        search_result = self.actions.web_search(f"install {tool_name} macOS")
+        search_result = await asyncio.to_thread(self.actions.web_search, f"install {tool_name} macOS")
         return {
             "success": False,
             "message": f"Could not auto-install {tool_name}",

@@ -136,8 +136,17 @@ def scan_for_leaked_secrets(project_dir: str) -> List[Dict]:
         (r'password\s*=\s*["\'][^"\']{8,}["\']', "Hardcoded password"),
     ]
 
-    skip_dirs = {'__pycache__', '.git', 'node_modules', 'data', '.env'}
-    skip_extensions = {'.pyc', '.db', '.log', '.png', '.jpg', '.bak'}
+    skip_dirs = {
+        '__pycache__', '.git', '.hg', '.svn', '.claude',
+        '.venv', 'venv', 'env', 'node_modules',
+        'data', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+        'dist', 'build',
+    }
+    skip_extensions = {
+        '.pyc', '.pyo', '.db', '.sqlite', '.sqlite3', '.log',
+        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico',
+        '.bak', '.so', '.dylib', '.bin', '.lock',
+    }
 
     for root, dirs, files in os.walk(project_dir):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
@@ -149,8 +158,14 @@ def scan_for_leaked_secrets(project_dir: str) -> List[Dict]:
 
             filepath = os.path.join(root, f)
             try:
-                with open(filepath, 'r', errors='ignore') as fh:
-                    content = fh.read()
+                if os.path.getsize(filepath) > 2 * 1024 * 1024:
+                    continue
+                with open(filepath, 'rb') as fh:
+                    raw = fh.read(4096)
+                    if b'\x00' in raw:
+                        continue
+                    content = raw + fh.read()
+                content = content.decode('utf-8', errors='ignore')
                 for pattern, desc in secret_patterns:
                     matches = re.findall(pattern, content)
                     if matches:
@@ -254,7 +269,9 @@ def run_security_scan(project_dir: str) -> Dict:
         results["issues"].append({
             "severity": "CRITICAL",
             "type": "secret_leak",
-            **leak,
+            "secret_type": leak["type"],
+            "file": leak["file"],
+            "count": leak["count"],
         })
 
     # Check .env permissions
